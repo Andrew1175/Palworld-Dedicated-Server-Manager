@@ -7,7 +7,7 @@ Features:
 - Email notifications if the server does crash
 - Automated server updates
 - Automated Backups
-- Server Status (WIP)
+- Server Information (WIP)
 - More to come!
 
 Requirements:
