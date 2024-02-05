@@ -16,7 +16,7 @@ Requirements:
 - Steamcmd and palworld already installed
 
 Screenshots:
-![alt text](https://imgur.com/a/wdtgq0v)
+https://imgur.com/a/wdtgq0v
 
 Please report any issues using the Issues tab at the top.
 
