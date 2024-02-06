@@ -2,7 +2,7 @@
 This is a tool that will help you manage your dedicated server with ease (Windows Only)
 -------------------------------------------------------------------
 Features:
-- Automated Server Restarts
+- Automated server restarts with coundown messages in-game
 - Monitors server and brings it back online if it crashes
 - Email notifications if the server crashes
 - Discord channel messages if the server crashes
@@ -18,7 +18,7 @@ Requirements:
 
 Please report any issues using the Issues tab at the top.
 
-If you have any qeustions, feedback, or feature requests join my Discord and let me know! https://discord.gg/bPp9kfWe5t
+If you have any questions, feedback, or feature requests join my Discord and let me know! https://discord.gg/bPp9kfWe5t
 
 Screenshots:
 ![MainTab](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/assets/60053428/f6cbe456-dbfd-40c1-907c-edce5d889286)
