@@ -4,7 +4,8 @@ This is a tool that will help you manage your dedicated server with ease (Window
 Features:
 - Automated Server Restarts
 - Monitors server and brings it back online if it crashes
-- Email notifications if the server does crash
+- Email notifications if the server crashes
+- Discord channel messages if the server crashes
 - Automated server updates
 - Automated Backups
 - Server Information (WIP)
@@ -20,8 +21,8 @@ Please report any issues using the Issues tab at the top.
 If you have any qeustions, feedback, or feature requests join my Discord and let me know! https://discord.gg/bPp9kfWe5t
 
 Screenshots:
-![MainTab](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/assets/60053428/9a9a3dcb-f8b2-4328-bdbc-8f3fdd3a6f78)
+![MainTab](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/assets/60053428/f6cbe456-dbfd-40c1-907c-edce5d889286)
 
-![Server Config Tab](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/assets/60053428/c80e08a0-dc68-4d57-9d06-00fd880ee259)
+![Server Config Tab](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/assets/60053428/3fe51f45-b0a3-47ef-83ef-d76df54c89f9)
 
-![Email Config Tab](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/assets/60053428/24a4992e-2deb-46a6-9941-50b4559b5f86)
+![Alerts Config Tab](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/assets/60053428/82766243-737d-458f-8fb8-210b2d3248a1)
