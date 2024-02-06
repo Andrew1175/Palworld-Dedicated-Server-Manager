@@ -5,7 +5,7 @@ Features:
 - Automated server restarts with countdown messages in-game
 - Monitors server and brings it back online if it crashes
 - Email notifications if the server crashes
-- Discord channel messages if the server crashes
+- Discord channel messages if the server crashes (Webhooks)
 - Automated server updates
 - Automated Backups
 - Server Information (WIP)
