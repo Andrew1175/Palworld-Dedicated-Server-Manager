@@ -1,0 +1,19 @@
+Version 1.1.2
+ - Cleaned up code
+ - Fixed issue where directories weren't be read properly
+ - Removed redundant shell commands that were causing issues with logging
+ - Fixed error logging that was supposed to be working in version 1.1.1
+
+Version 1.1.1
+- Added additional error logging to troubleshoot issues easier
+
+Version 1.1.0
+- Added feature to send Discord channel messages on server crashes (Webhooks)
+- Added button to update server info on demand
+- Fixed the monitor interval not checking for server updates when Enabled and when the server crashed
+- Fixed occurrence where the monitor interval was triggering while the restart interval was occurring which resulted in false server crash emails being sent
+- Fixed issue where email alerts were not being sent when Enabled
+- Updated GUI
+
+Version 1.0.0
+- Initial Release!

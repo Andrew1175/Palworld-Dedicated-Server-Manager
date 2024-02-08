@@ -16,10 +16,10 @@ from tkinter import ttk
 from tkinter import filedialog
 from tkinter import messagebox
 
-SETTINGS_FILE = os.path.join(os.path.expanduser("~"), "Documents\\Palworld Server Manager", "settings.json")
+SETTINGS_FILE = os.path.join(os.path.expanduser("~"), "Documents/Palworld Server Manager", "settings.json")
 
 def settings_directory():
-    settings_directory = os.path.join(os.path.expanduser("~"), "Documents\\Palworld Server Manager")
+    settings_directory = os.path.join(os.path.expanduser("~"), "Documents/Palworld Server Manager")
     if not os.path.exists(settings_directory):
         os.makedirs(settings_directory)
 
@@ -96,21 +96,21 @@ scheduled_time = None
 def update_commands():
     global arrcon_command_save_server, arrcon_command_shutdown_server, arrcon_command_server_message_30, arrcon_command_server_message_10, start_server_command, shutdown_server_command, rcon_pass, force_shutdown_server_command, arrcon_command_info_server
     try:
-        arrcon_exe_path = f'{arrcon_directory_selection.cget("text")}\\ARRCON.exe'
+        arrcon_exe_path = f'{arrcon_directory_selection.cget("text")}/ARRCON.exe'
         rcon_getport = rcon_port.cget("text")
         palworld_directory = server_directory_selection.cget("text")
         server_start_args = server_start_args_entry.get()
-        arrcon_command_save_server = f'call {arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "save"'
-        arrcon_command_info_server = f'call {arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "info"'
-        arrcon_command_shutdown_server = f'call {arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "shutdown 60 The_server_will_be_restarting_in_60_seconds"'
-        arrcon_command_server_message_30 = f'call {arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "broadcast The_server_will_be_restarting_in_30_seconds"'
-        arrcon_command_server_message_10 = f'call {arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "broadcast The_server_will_be_restarting_in_10_seconds"'
-        start_server_command = f'call {palworld_directory}\\PalServer.exe {server_start_args}'
-        shutdown_server_command = f'call {arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "shutdown 5 The_server_will_be_shutting_down_in_5_seconds"'
-        force_shutdown_server_command = f'call {arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "doexit"'
+        arrcon_command_save_server = f'{arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "save"'
+        arrcon_command_info_server = f'{arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "info"'
+        arrcon_command_shutdown_server = f'{arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "shutdown 60 The_server_will_be_restarting_in_60_seconds"'
+        arrcon_command_server_message_30 = f'{arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "broadcast The_server_will_be_restarting_in_30_seconds"'
+        arrcon_command_server_message_10 = f'{arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "broadcast The_server_will_be_restarting_in_10_seconds"'
+        start_server_command = f'{palworld_directory}/PalServer.exe {server_start_args}'
+        shutdown_server_command = f'{arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "shutdown 5 The_server_will_be_shutting_down_in_5_seconds"'
+        force_shutdown_server_command = f'{arrcon_exe_path} -H 127.0.0.1 -P {rcon_getport} -p {rcon_pass} "doexit"'
         return "commands updated"
-    except ValueError:
-        append_to_output("There was an issue creating the ARRCON commands and server startup command")
+    except Exception as e:
+        append_to_output(f"There was an issue creating the ARRCON commands and server startup command. Error: " + str(e))
 
 # Function that sends message to output window
 def append_to_output(message):
@@ -127,7 +127,7 @@ def server_status_info():
         results = server_check_update_commands()
         if results == "good":
             try:
-                process = subprocess.Popen(arrcon_command_info_server, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                process = subprocess.Popen(arrcon_command_info_server, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
                 stdout = process.communicate()
 
@@ -163,6 +163,7 @@ def server_status_info():
             except subprocess.CalledProcessError as e:
                 server_status_state_label.config(text="Offline", foreground="red")
                 server_version_state_label.config(text="?")
+                append_to_output("Unable to update server info due to error: "+ str(e))
                 root.after(60000, server_status_info)
         else:
             root.after(60000, server_status_info)
@@ -173,23 +174,24 @@ def server_status_info():
 
 def save_server():
     append_to_output("Saving Palworld Server...")
+    root.update()
     try:
-        subprocess.Popen(arrcon_command_save_server, shell=True)
+        subprocess.Popen(arrcon_command_save_server)
+        append_to_output("Palworld server was saved successfully...")
     except Exception as e:
-        append_to_output(f"Couldn't save the server due to error: {e}")
-    append_to_output("Palworld server was saved successfully...")
+        append_to_output(f"Couldn't save the server due to error: " + str(e))
 
 def shutdown_server(type):
     if type == "graceful":
         try:
-            subprocess.Popen(shutdown_server_command, shell=True)
+            subprocess.Popen(shutdown_server_command)
         except Exception as e:
-            append_to_output(f"Couldn't shutdown the server due to error: {e}")
+            append_to_output(f"Couldn't shutdown the server due to error: " + str(e))
     if type == "force":
         try:
-            subprocess.Popen(force_shutdown_server_command, shell=True)
+            subprocess.Popen(force_shutdown_server_command)
         except Exception as e:
-            append_to_output(f"Couldn't shutdown the server due to error: {e}")
+            append_to_output(f"Couldn't shutdown the server due to error: " + str(e))
 
 # Function to save the server during the restart interval
 def save_server_interval(restartinterval):
@@ -204,9 +206,9 @@ def save_server_interval(restartinterval):
         current_function = "save_server_interval"
         append_to_output("Saving Palworld Server...")
         try:
-            subprocess.Popen(arrcon_command_save_server, shell=True)
+            subprocess.Popen(arrcon_command_save_server)
         except Exception as e:
-            append_to_output(f"Couldn't save the server due to error: {e}")
+            append_to_output(f"Couldn't save the server due to error: " + str(e))
         append_to_output("Palworld server was saved successfully...")
         scheduled_time = time.time() + 5  # Store the scheduled time (5 seconds in the future)
         after_id = root.after(5000, lambda: shutdown_server_interval(restartinterval))
@@ -223,9 +225,9 @@ def shutdown_server_interval(restartinterval):
     current_function = "shutdown_server"
     append_to_output("Shutting Down Palworld Server...")
     try:
-        subprocess.Popen(arrcon_command_shutdown_server, shell=True)
+        subprocess.Popen(arrcon_command_shutdown_server)
     except Exception as e:
-        append_to_output(f"Couldn't shutdown the server due to error: {e}")
+        append_to_output(f"Couldn't shutdown the server due to error: " + str(e))
     append_to_output("The server will go down in 60 seconds...")
     scheduled_time = time.time() + 70  # Store the scheduled time (30 seconds in the future)
     after_id = root.after(30000, lambda: message_server_30(restartinterval))
@@ -234,7 +236,7 @@ def shutdown_server_interval(restartinterval):
 def message_server_30(restartinterval):
     global after_id, current_function, scheduled_time
     current_function = "message_server_30"
-    subprocess.Popen(arrcon_command_server_message_30, shell=True)
+    subprocess.Popen(arrcon_command_server_message_30)
     after_id = root.after(20000, lambda: message_server_10(restartinterval))
 
 # Function to message the server
@@ -242,9 +244,9 @@ def message_server_10(restartinterval):
     global after_id, current_function, scheduled_time
     current_function = "message_server_10"
     try:
-        subprocess.Popen(arrcon_command_server_message_10, shell=True)
+        subprocess.Popen(arrcon_command_server_message_10)
     except Exception as e:
-        append_to_output(f"Couldn't send message to the server due to error: {e}")
+        append_to_output(f"Couldn't send message to the server due to error: " + str(e))
     after_id = root.after(20000, lambda: restart_server(restartinterval))
 
 # Function to restart the server
@@ -278,9 +280,9 @@ def restart_server(restartinterval):
             if results == "server updated":
                 append_to_output("Starting server...")
                 try:
-                    subprocess.Popen(start_server_command, shell=True)
+                    subprocess.Popen(start_server_command)
                 except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
                 root.after(3000, check_palworld_process)
                 scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
                 after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
@@ -290,9 +292,9 @@ def restart_server(restartinterval):
             elif results == "server not updated":
                 append_to_output("Starting server...")
                 try:
-                    subprocess.Popen(start_server_command, shell=True)
+                    subprocess.Popen(start_server_command)
                 except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
                 root.after(3000, check_palworld_process)
                 scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
                 after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
@@ -302,9 +304,9 @@ def restart_server(restartinterval):
         else:
             append_to_output("Starting server...")
             try:
-                subprocess.Popen(start_server_command, shell=True)
+                subprocess.Popen(start_server_command)
             except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
             root.after(3000, check_palworld_process)
             scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
             after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
@@ -318,9 +320,9 @@ def restart_server(restartinterval):
             if results == "server updated":
                 append_to_output("Starting server...")
                 try:
-                    subprocess.Popen(start_server_command, shell=True)
+                    subprocess.Popen(start_server_command)
                 except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
                 root.after(3000, check_palworld_process)
                 scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
                 after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
@@ -330,9 +332,9 @@ def restart_server(restartinterval):
             elif results == "server not updated":
                 append_to_output("Starting server...")
                 try:
-                    subprocess.Popen(start_server_command, shell=True)
+                    subprocess.Popen(start_server_command)
                 except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
                 root.after(3000, check_palworld_process)
                 scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
                 after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
@@ -342,9 +344,9 @@ def restart_server(restartinterval):
         else:
             append_to_output("Starting server...")
             try:
-                subprocess.Popen(start_server_command, shell=True)
+                subprocess.Popen(start_server_command)
             except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
             root.after(3000, check_palworld_process)
             scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
             after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
@@ -354,6 +356,7 @@ def restart_server(restartinterval):
 
 def kill_palworld_process():
     append_to_output("Palworld Server is shutdown. Checking for residual processes... Sometimes the server process gets stuck")
+    root.update()
 
     task_name = "PalServer-Win64-Test-Cmd.exe"
 
@@ -363,6 +366,7 @@ def kill_palworld_process():
     # Check if the process is in the list
     if task_name in running_processes:
         append_to_output(f"Task {task_name} is still running. Ending the process...")
+        root.update()
     
         # Find the process by name and terminate it
         for proc in psutil.process_iter(['pid', 'name']):
@@ -416,7 +420,7 @@ def send_email():
         append_to_output("Sent notification email successfully.")
 
     except Exception as e:
-        append_to_output(f"Notification email was not sent successfully due to error: {e}")
+        append_to_output(f"Notification email was not sent successfully due to error: " + str(e))
         send_email_checkbox_var.set(False)
 
     finally:
@@ -454,9 +458,9 @@ def monitor_server(monitorinterval):
             if results == "server updated":
                 append_to_output("Starting server...")
                 try:
-                    subprocess.Popen(start_server_command, shell=True)
+                    subprocess.Popen(start_server_command)
                 except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
                 if send_email_checked == True:
                     send_email()
                 if discord_message_checked == True:
@@ -465,9 +469,9 @@ def monitor_server(monitorinterval):
             elif results == "server not updated":
                 append_to_output("Starting server...")
                 try:
-                    subprocess.Popen(start_server_command, shell=True)
+                    subprocess.Popen(start_server_command)
                 except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
                 if send_email_checked == True:
                     send_email()
                 if discord_message_checked == True:
@@ -476,9 +480,9 @@ def monitor_server(monitorinterval):
         else:
             append_to_output("Starting server...")
             try:
-                subprocess.Popen(start_server_command, shell=True)
+                subprocess.Popen(start_server_command)
             except Exception as e:
-                    append_to_output(f"Couldn't start the server due to error: {e}")
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
             if send_email_checked == True:
                 send_email()
             if discord_message_checked == True:
@@ -515,8 +519,8 @@ def disable_monitor_server():
                 root.after_cancel(monitor_after_id)
                 monitor_after_id = None  # Reset id to None
                 append_to_output("Monitor interval was disabled.")
-    except ValueError:
-        append_to_output("There was an error disabling the monitor interval")
+    except Exception as e:
+        append_to_output("There was an error disabling the monitor interval due to error: " + str(e))
 
 def enable_server_restart():
     global after_id, current_function, scheduled_time
@@ -549,8 +553,8 @@ def disable_server_restart():
                 root.after_cancel(after_id)
                 after_id = None  # Reset after_id to None
                 append_to_output("Server restart interval stopped.")
-    except ValueError:
-        append_to_output("There was an error disabling the server restart interval")
+    except Exception as e:
+        append_to_output("There was an error disabling the server restart interval due to error: " + str(e))
 
 def enable_send_email():
     global send_email_checked
@@ -629,7 +633,7 @@ def backup_server():
         if not backup_directory_selection.cget("text") == "No directory selected":
             palworld_directory = server_directory_selection.cget("text")
             backup_dir = backup_directory_selection.cget("text")
-            source_dir = f"{palworld_directory}\\Pal\\Saved\\SaveGames\\0"
+            source_dir = f"{palworld_directory}/Pal/Saved/SaveGames/0"
 
             # Create the backup directory if it doesn't exist
             os.makedirs(backup_dir, exist_ok=True)
@@ -681,23 +685,23 @@ def start_server():
                     if results == "server updated":
                         append_to_output("Starting server...")
                         try:
-                            subprocess.Popen(start_server_command, shell=True)
+                            subprocess.Popen(start_server_command)
                         except Exception as e:
-                            append_to_output(e)
+                            append_to_output("There was an issue starting the server due to error: " + str(e))
                         root.after(3000, check_palworld_process)
                     elif results == "server not updated":
                         append_to_output("Starting server...")
                         try:
-                            subprocess.Popen(start_server_command, shell=True)
+                            subprocess.Popen(start_server_command)
                         except Exception as e:
-                            append_to_output(e)
+                            append_to_output("There was an issue starting the server due to error: " + str(e))
                         root.after(3000, check_palworld_process)
                 else:
                     append_to_output("Starting server...")
                     try:
-                        subprocess.Popen(start_server_command, shell=True)
+                        subprocess.Popen(start_server_command)
                     except Exception as e:
-                        append_to_output(e)
+                        append_to_output("There was an issue starting the server due to error: " + str(e))
                     root.after(3000, check_palworld_process)
         else:
             append_to_output("ARRCON commands failed to update. Check the Server Config tab and be sure everything is configured first.")
@@ -721,6 +725,7 @@ def graceful_shutdown():
             if results == "commands updated":
                 save_server()
                 append_to_output("The server will shutdown in 10 seconds...")
+                root.update()
                 root.after(5000, shutdown_server("graceful"))
                 root.after(13000, kill_palworld_process)
             else:
@@ -760,7 +765,7 @@ def update_palworld_server():
             if task_name not in running_processes:
                 palworld_directory = server_directory_selection.cget("text")
                 steamcmd_directory = steamcmd_directory_selection.cget("text")
-                update_palworld_command = f'call {steamcmd_directory}\\steamcmd.exe +force_install_dir {palworld_directory} +login anonymous +app_update 2394010 +quit'
+                update_palworld_command = f'call {steamcmd_directory}/steamcmd.exe +force_install_dir {palworld_directory} +login anonymous +app_update 2394010 +quit'
                 try:
                     process = subprocess.Popen(update_palworld_command, shell=True, stdout=subprocess.PIPE, text=True, universal_newlines=True)
                     for line in process.stdout:
@@ -774,7 +779,7 @@ def update_palworld_server():
                         append_to_output("The server was unable to check for updates")
                         return "server not updated"
                 except Exception as e:
-                    append_to_output(f"Couldn't update the server due to error: {e}")
+                    append_to_output(f"Couldn't update the server due to error: " + str(e))
             else:
                 append_to_output("Server is running. Cannot update the server unless the server is stopped.")
                 messagebox.showinfo("Server Running", "Cannot run this function unless the server is stopped")
@@ -793,7 +798,7 @@ def validate_palworld_server():
             if task_name not in running_processes:
                 palworld_directory = server_directory_selection.cget("text")
                 steamcmd_directory = steamcmd_directory_selection.cget("text")
-                validate_palworld_command = f'call {steamcmd_directory}\\steamcmd.exe +force_install_dir {palworld_directory} +login anonymous +app_update 2394010 validate +quit'
+                validate_palworld_command = f'call {steamcmd_directory}/steamcmd.exe +force_install_dir {palworld_directory} +login anonymous +app_update 2394010 validate +quit'
                 try:
                     process = subprocess.Popen(validate_palworld_command, shell=True, stdout=subprocess.PIPE, text=True, universal_newlines=True)
                     for line in process.stdout:
@@ -803,7 +808,7 @@ def validate_palworld_server():
                     if return_code == 0:
                         append_to_output("The server was validated successfully")
                 except Exception as e:
-                    append_to_output(f"Couldn't validate the server due to error: {e}")
+                    append_to_output(f"Couldn't validate the server due to error: " + str(e))
             else:
                 append_to_output("Server is running. Cannot update the server unless the server is stopped.")
                 messagebox.showinfo("Server Running", "Cannot run this function unless the server is stopped")
@@ -981,8 +986,8 @@ def open_ini_file(directory):
         if os.path.isfile(ini_file_path):
             try:
                 subprocess.Popen(['start', '', ini_file_path], shell=True)
-            except subprocess.CalledProcessError as e:
-                print(f"Error opening file: {e}")
+            except Exception as e:
+                append_to_output("Error opening file: " + str(e))
         else:
             append_to_output("You need to select a valid directory first.")
             messagebox.showinfo("Invalid Directory", "You need to select a valid directory first")
@@ -1023,8 +1028,8 @@ root = tk.Tk()
 root.title("Palworld Dedicated Server Manager")
 try:
     root.iconbitmap('palworld_logo.ico')
-except ValueError:
-    print("Icon wasn't able to load")
+except Exception as e:
+    append_to_output("Icon wasn't able to load due to error: " + str(e))
 
 tabControl = ttk.Notebook(root)
 
@@ -1288,7 +1293,7 @@ discordEntry.grid(column=1, row=0)
 app_info_frame = tk.LabelFrame(aboutTab, text="Application Info")
 app_info_frame.grid(column=0, row=0, padx=10, pady=10, sticky=tk.N)
 
-app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.1.1")
+app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.1.2")
 app_version_label.grid(column=0, row=0, padx=10)
 
 app_update_button = ttk.Button(app_info_frame, text="Check for Updates", command=check_for_updates)
