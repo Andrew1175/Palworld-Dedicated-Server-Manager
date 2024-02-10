@@ -2,7 +2,7 @@ import subprocess
 import time
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import psutil
 import json
 import smtplib
@@ -11,6 +11,7 @@ from email.mime.multipart import MIMEMultipart
 import webbrowser
 import zipfile
 import requests
+import schedule
 import tkinter as tk
 from tkinter import ttk
 from tkinter import filedialog
@@ -27,6 +28,8 @@ def save_settings():
     settings_directory()
     settings = {
         "restartEntry": restartEntry.get(),
+        "restartScheduleEntry": restartScheduleEntry.get(),
+        "ampm_var": ampm_var.get(),
         "monitorEntry": monitorEntry.get(),
         "server_directory_selection": server_directory_selection.cget("text"),
         "arrcon_directory_selection": arrcon_directory_selection.cget("text"),
@@ -46,6 +49,8 @@ def load_settings():
         with open(SETTINGS_FILE, "r") as file:
             settings = json.load(file)
             restartEntry.insert(0, settings.get("restartEntry", ""))
+            restartScheduleEntry.insert(0, settings.get("restartScheduleEntry", ""))
+            ampm_var.set(settings.get("ampm_var", "AM"))
             monitorEntry.insert(0, settings.get("monitorEntry", ""))
             server_directory_selection.config(text=settings.get("server_directory_selection", "No directory selected"))
             arrcon_directory_selection.config(text=settings.get("arrcon_directory_selection", "No directory selected"))
@@ -226,11 +231,25 @@ def shutdown_server_interval(restartinterval):
     append_to_output("Shutting Down Palworld Server...")
     try:
         subprocess.Popen(arrcon_command_shutdown_server)
+        append_to_output("The server will go down in 60 seconds...")
+        scheduled_time = time.time() + 70  # Store the scheduled time (30 seconds in the future)
+        after_id = root.after(30000, lambda: message_server_30(restartinterval))
     except Exception as e:
+        current_function = ""
         append_to_output(f"Couldn't shutdown the server due to error: " + str(e))
-    append_to_output("The server will go down in 60 seconds...")
-    scheduled_time = time.time() + 70  # Store the scheduled time (30 seconds in the future)
-    after_id = root.after(30000, lambda: message_server_30(restartinterval))
+
+def scheduled_shutdown_server():
+    global after_id, current_function, scheduled_time
+    current_function = "shutdown_server"
+    append_to_output("Shutting Down Palworld Server...")
+    try:
+        subprocess.Popen(arrcon_command_shutdown_server)
+        append_to_output("The server will go down in 60 seconds...")
+        scheduled_time = time.time() + 70  # Store the scheduled time (30 seconds in the future)
+        after_id = root.after(30000, scheduled_message_server_30)
+    except Exception as e:
+        current_function = ""
+        append_to_output(f"Couldn't shutdown the server due to error: " + str(e))
 
 # Function to message the server
 def message_server_30(restartinterval):
@@ -238,6 +257,12 @@ def message_server_30(restartinterval):
     current_function = "message_server_30"
     subprocess.Popen(arrcon_command_server_message_30)
     after_id = root.after(20000, lambda: message_server_10(restartinterval))
+
+def scheduled_message_server_30():
+    global after_id, current_function, scheduled_time
+    current_function = "message_server_30"
+    subprocess.Popen(arrcon_command_server_message_30)
+    after_id = root.after(20000, scheduled_message_server_10)
 
 # Function to message the server
 def message_server_10(restartinterval):
@@ -248,6 +273,15 @@ def message_server_10(restartinterval):
     except Exception as e:
         append_to_output(f"Couldn't send message to the server due to error: " + str(e))
     after_id = root.after(20000, lambda: restart_server(restartinterval))
+
+def scheduled_message_server_10():
+    global after_id, current_function, scheduled_time
+    current_function = "message_server_10"
+    try:
+        subprocess.Popen(arrcon_command_server_message_10)
+        after_id = root.after(20000, scheduled_restart_server)
+    except Exception as e:
+        append_to_output(f"Couldn't send message to the server due to error: " + str(e))
 
 # Function to restart the server
 def restart_server(restartinterval):
@@ -352,6 +386,86 @@ def restart_server(restartinterval):
             after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
             trueRestartTime = int(restartinterval / 1000 / 60 / 60)
             append_to_output(f"The server will restart again in {trueRestartTime} hours")
+            current_function = None
+
+def scheduled_restart_server():
+    global after_id, current_function, scheduled_time
+    current_function = "restart_server"
+    append_to_output("Palworld Server is shutdown. Checking for residual processes... Sometimes the server process gets stuck")
+    root.update()
+    if enable_backups == True:
+            backup_server()
+
+    task_name = "PalServer-Win64-Test-Cmd.exe"
+
+    # Get the list of running processes
+    running_processes = [proc.name() for proc in psutil.process_iter()]
+
+    # Check if the process is in the list
+    if task_name in running_processes:
+        append_to_output(f"Task {task_name} is still running. Ending the process...")
+    
+        # Find the process by name and terminate it
+        for proc in psutil.process_iter(['pid', 'name']):
+            if proc.info['name'] == task_name:
+                psutil.Process(proc.info['pid']).terminate()
+        root.update()
+        time.sleep(3)
+        append_to_output("Process ended. Starting the server back up...")
+        root.update()
+        if update_server_startup_checkbox_var.get():
+            results = update_palworld_server()
+            if results == "server updated":
+                append_to_output("Starting server...")
+                try:
+                    subprocess.Popen(start_server_command)
+                    root.after(3000, check_palworld_process)
+                except Exception as e:
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
+                current_function = None
+            elif results == "server not updated":
+                append_to_output("Starting server...")
+                try:
+                    subprocess.Popen(start_server_command)
+                    root.after(3000, check_palworld_process)
+                except Exception as e:
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
+                current_function = None
+        else:
+            append_to_output("Starting server...")
+            try:
+                subprocess.Popen(start_server_command)
+                root.after(3000, check_palworld_process)
+            except Exception as e:
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
+            current_function = None
+    else:
+        append_to_output(f"Task {task_name} is not running. Starting the server back up...")
+        if update_server_startup_checkbox_var.get():
+            results = update_palworld_server()
+            if results == "server updated":
+                append_to_output("Starting server...")
+                try:
+                    subprocess.Popen(start_server_command)
+                    root.after(3000, check_palworld_process)
+                except Exception as e:
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
+                current_function = None
+            elif results == "server not updated":
+                append_to_output("Starting server...")
+                try:
+                    subprocess.Popen(start_server_command)
+                    root.after(3000, check_palworld_process)
+                except Exception as e:
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
+                current_function = None
+        else:
+            append_to_output("Starting server...")
+            try:
+                subprocess.Popen(start_server_command)
+                root.after(3000, check_palworld_process)
+            except Exception as e:
+                    append_to_output(f"Couldn't start the server due to error: " + str(e))
             current_function = None
 
 def kill_palworld_process():
@@ -528,18 +642,23 @@ def enable_server_restart():
     if server_check_results == "check good":
         update_commands_results = update_commands()
         if update_commands_results == "commands updated":
-            try:
-                if restart_interval_checkbox_var.get():
-                    restartinterval = int(restartEntry.get()) * 60 * 60 * 1000  # Convert to minutes then hours and then translate to milliseconds
-                    true_value = int(restartinterval / 1000 / 60 / 60)
-                    append_to_output(f"Server Restart Interval has been enabled. The server will restart in {true_value} hour(s)")
-                    current_function = "enable_server_restart"
-                    scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
-                    after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
-                else:
-                    disable_server_restart()
-            except ValueError:
-                append_to_output("Your restart interval cannot be empty and can only contain numerical values")
+            if restartScheduleCheckbox_var.get() == False:
+                try:
+                    if restart_interval_checkbox_var.get():
+                        restartinterval = int(restartEntry.get()) * 60 * 60 * 1000  # Convert to minutes then hours and then translate to milliseconds
+                        true_value = int(restartinterval / 1000 / 60 / 60)
+                        append_to_output(f"Server Restart Interval has been enabled. The server will restart in {true_value} hour(s)")
+                        current_function = "enable_server_restart"
+                        scheduled_time = time.time() + restartinterval  # Store the scheduled time (restartinterval seconds in the future)
+                        after_id = root.after(restartinterval, lambda: save_server_interval(restartinterval))
+                    else:
+                        disable_server_restart()
+                except ValueError:
+                    append_to_output("Your restart interval cannot be empty and can only contain numerical values")
+                    restart_interval_checkbox_var.set(False)
+            else:
+                append_to_output("Scheduled Restarts is already Enabled. You cannot use this both of these features at the same time.")
+                messagebox.showinfo("Warning", "Scheduled Restarts is already Enabled. You cannot use this both of these features at the same time.")
                 restart_interval_checkbox_var.set(False)
     else:
         append_to_output("Server check failed. Check the Server Config tab and be sure everything is configured first.")
@@ -556,15 +675,68 @@ def disable_server_restart():
     except Exception as e:
         append_to_output("There was an error disabling the server restart interval due to error: " + str(e))
 
+def start_scheduler():
+    schedule.run_pending()
+    root.after(1000, start_scheduler)
+
+def scheduled_server_restart():
+    append_to_output("Scheduled server restart executed at: " + time.strftime("%H:%M:%S"))
+    root.update()
+    save_server()
+    root.after(3000, scheduled_shutdown_server)
+
+def enable_scheduled_restart():
+    global after_id, current_function, scheduled_time, restartServerJob
+    server_check_results = server_check()
+    if server_check_results == "check good":
+        update_commands_results = update_commands()
+        if update_commands_results == "commands updated":
+            if restartScheduleCheckbox_var.get():
+                if restart_interval_checkbox_var.get() == False:
+                    timeEntry = restartScheduleEntry.get()
+                    if not timeEntry == "":
+                        timeEntry = restartScheduleEntry.get()
+                        timeInputCheck = validate_time_input(timeEntry)
+                        if timeInputCheck == "time good":
+                            timeEntry = str(restartScheduleEntry.get() + " " + ampm_var.get())
+                            strptimeEntry = datetime.strptime(timeEntry, "%I:%M %p")
+                            milTimeEntry = strptimeEntry.strftime("%H:%M")
+                            restartServerJob = schedule.every().day.at(milTimeEntry).do(scheduled_server_restart)
+                            start_scheduler()
+                            append_to_output(f"Your server will now restart every day at {timeEntry}")
+                        else:
+                            append_to_output('Time entry is invalid. Please make sure to follow the proper 12 hour format.')
+                            append_to_output('Example 12-hour Format: 1:25PM')
+                            restartScheduleCheckbox_var.set(False)
+                    else:
+                        append_to_output('Time entry is empty')
+                        append_to_output('Example 12-hour Format: 1:25PM')
+                        restartScheduleCheckbox_var.set(False)
+                else:
+                    append_to_output("Restart Intervals is already Enabled. You cannot use this both of these features at the same time.")
+                    messagebox.showinfo("Warning", "Restart Intervals is already Enabled. You cannot use this both of these features at the same time.")
+                    restartScheduleCheckbox_var.set(False)
+            elif restartScheduleCheckbox_var.get() == False:
+                schedule.cancel_job(restartServerJob)
+                append_to_output("Disabled scheduled restarts")
+    else:
+        append_to_output("Server check failed. Check the Server Config tab and be sure everything is configured first.")
+        restartScheduleCheckbox_var.set(False)
+
 def enable_send_email():
     global send_email_checked
     if send_email_checkbox_var.get():
-        if email_address_entry.get() and email_password_entry.get() and smtp_server_entry.get() and smtp_port_entry.get():
-            send_email_checked = True
-            append_to_output("Email notifications have been enabled")
+        if monitor_interval_checkbox_var.get():
+            if email_address_entry.get() and email_password_entry.get() and smtp_server_entry.get() and smtp_port_entry.get():
+                send_email_checked = True
+                append_to_output("Email notifications have been enabled")
+            else:
+                append_to_output("Be sure to fill out all of the information required in the Alerts Config tab")
+                messagebox.showinfo("Invalid Email Information", "1 or more fields are missing in the Alerts Config tab")
+                send_email_checkbox_var.set(False)
         else:
-            append_to_output("Be sure to fill out all of the information required in the Alerts Config tab")
-            messagebox.showinfo("Invalid Email Information", "1 or more fields are missing in the Alerts Config tab")
+            append_to_output("You cannot enable this feature while Monitor Interval is disabled")
+            messagebox.showinfo("Monitor Interval Disabled", "You cannot enable this feature while Monitor Interval is disabled")
             send_email_checkbox_var.set(False)
     else:
         disable_send_email()
@@ -578,12 +750,17 @@ def disable_send_email():
 def enable_send_discord_message():
     global discord_message_checked
     if discordWebhookCheckbox_var.get():
-        if discordEntry.get():
-            discord_message_checked = True
-            append_to_output("Discord alerts have been Enabled")
+        if monitor_interval_checkbox_var.get():
+            if discordEntry.get():
+                discord_message_checked = True
+                append_to_output("Discord alerts have been Enabled")
+            else:
+                append_to_output("Be sure to enter a Discord Webhook URL in the Alerts Config tab.")
+                messagebox.showinfo("Invalid Discord Webhook URL", "You need to enter a Discord Webhook URL in the Alerts Config tab")
+                discordWebhookCheckbox_var.set(False)
         else:
-            append_to_output("Be sure to enter a Discord Webhook URL in the Alerts Config tab.")
-            messagebox.showinfo("Invalid Discord Webhook URL", "You need to enter a Discord Webhook URL in the Alerts Config tab")
+            append_to_output("You cannot enable this feature while Monitor Interval is disabled")
+            messagebox.showinfo("Monitor Interval Disabled", "You cannot enable this feature while Monitor Interval is disabled")
             discordWebhookCheckbox_var.set(False)
     elif discordWebhookCheckbox_var.get() == False:
         discord_message_checked = False
@@ -628,6 +805,49 @@ def enable_server_backups():
         enable_backups = False
         append_to_output("Server backups have been Disabled")
 
+def enable_delete_backups():
+    if deleteOldBackupsEntry.get() == "":
+        append_to_output('You cannot leave the entry empty')
+        messagebox.showinfo("Invalid Input", 'You cannot leave the entry empty')
+        deleteOldBackupsCheckbox_var.set(False)
+    elif deleteOldBackupsCheckbox_var.get() == False:
+        append_to_output("Old backups will no longer be deleted")
+    else:
+        try:
+            value = int(deleteOldBackupsEntry.get())
+            append_to_output(f"Backups older than {value} day will now be deleted whenever new backups are created")
+        except ValueError:
+            append_to_output('Only numbers are allowed')
+            messagebox.showinfo("Invalid Input", 'Only numbers are allowed')
+            deleteOldBackupsCheckbox_var.set(False)
+
+def delete_old_backups():
+    current_time = datetime.now()
+    daysEntry = int(deleteOldBackupsEntry.get())
+    append_to_output(str(daysEntry))
+
+    # Calculate the time 1 day ago
+    days_ago = current_time - timedelta(days=daysEntry)
+
+    # Directory containing the files
+    backup_dir = backup_directory_selection.cget("text")
+
+    # Iterate over the files in the directory
+    for filename in os.listdir(backup_dir):
+        # Check if the file name starts with "palworld_backup_"
+        if filename.startswith("palworld_backup_"):
+            # Get the full path of the file
+            filepath = os.path.join(backup_dir, filename)
+        
+            # Get the modification time of the file
+            modification_time = datetime.fromtimestamp(os.path.getmtime(filepath))
+        
+            # Compare the modification time with the time 1 day ago
+            if modification_time < days_ago:
+                # Delete the file
+                os.remove(filepath)
+                append_to_output(f"Old backup deleted: {filepath}")
+
 def backup_server():
     if not palworld_exe_result_label.cget("text") == "PalServer.exe not found":
         if not backup_directory_selection.cget("text") == "No directory selected":
@@ -658,6 +878,8 @@ def backup_server():
 
             # Print a message indicating the completion of the backup
             append_to_output(f"Backup of {source_dir} completed at {backup_file_path}")
+            if deleteOldBackupsCheckbox_var.get():
+                delete_old_backups()
         else:
             append_to_output("You must select a Backup Directory to use this function. Check your Server Config tab")
             messagebox.showinfo("Invalid Directory", "You must select a valid Backup directory to use this function")
@@ -665,7 +887,6 @@ def backup_server():
         append_to_output("You must select a valid Palworld Server Directory to use this function. Check your Server Config tab")
         messagebox.showinfo("Invalid Directory", "You must select a valid Palworld Server directory to use this function")
 
-# Function that the start server button triggers
 def start_server():
     server_check_results = server_check()
     if server_check_results == "check good":
@@ -1022,6 +1243,20 @@ def functions_go_button_click():
     elif selected_function == "Backup Server":
         backup_server()
 
+def validate_time_input(time):
+    # Validate the input format (HH:MM)
+    if len(time) == 0:
+        return True  # Allow empty input
+    if not re.match(r'^(1[0-2]|0?[1-9]):[0-5][0-9]$', time.strip()):
+        append_to_output("Invalid time format")
+        return False  # Reject invalid format
+
+    # Validate the hour and minute values
+    hour, minute = map(int, time.split(':')[0:2])
+    if not (0 <= hour <= 12 and 0 <= minute <= 59):
+        append_to_output("Invalid time format")
+        return False  # Reject invalid time
+    return "time good"  # Accept valid input
 
 ############################## Root Code ######################################################
 root = tk.Tk()
@@ -1057,42 +1292,45 @@ interval_frame = tk.LabelFrame(mainTab, text="Interval Configuration")
 interval_frame.grid(column=0, row=0, padx=10, pady=10, sticky=tk.NSEW)
 
 restart_interval_checkbox_var = tk.BooleanVar()
-
 restart_interval_checkbox = ttk.Checkbutton(interval_frame, variable=restart_interval_checkbox_var, command=enable_server_restart)
 restart_interval_checkbox.grid(column=0, row=0)
-
 restartLabel = ttk.Label(interval_frame, text="Server Restart Interval (hours):")
 restartLabel.grid(column=1, row=0, sticky=tk.W)
+restartEntry = ttk.Entry(interval_frame, width=3)
+restartEntry.grid(column=2, row=0, sticky=tk.W)
 
-restartEntry = ttk.Entry(interval_frame, width=5)
-restartEntry.grid(column=2, row=0)
+restartScheduleCheckbox_var = tk.BooleanVar()
+restartScheduleCheckbox = ttk.Checkbutton(interval_frame, variable=restartScheduleCheckbox_var, command=enable_scheduled_restart)
+restartScheduleCheckbox.grid(column=0, row=1)
+restartScheduleLabel = ttk.Label(interval_frame, text="Daily Server Restart Time (12-hour Format):")
+restartScheduleLabel.grid(column=1, row=1, sticky=tk.W)
+restartTimeEntry_var = tk.StringVar()
+restartScheduleEntry = ttk.Entry(interval_frame, textvariable=restartTimeEntry_var, width=6)
+restartScheduleEntry.grid(column=2, row=1, sticky=tk.W)
+ampm_var = tk.StringVar(value="AM")
+ampm_combobox = ttk.Combobox(interval_frame, textvariable=ampm_var, values=["AM", "PM"], width=4)
+ampm_combobox.grid(column=3, row=1)
 
 monitor_interval_checkbox_var = tk.BooleanVar()
 
 monitor_interval_checkbox = ttk.Checkbutton(interval_frame, variable=monitor_interval_checkbox_var, command=enable_monitor_server)
-monitor_interval_checkbox.grid(column=0, row=1)
-
+monitor_interval_checkbox.grid(column=0, row=2)
 monitorLabel = ttk.Label(interval_frame, text="Monitor Interval (minutes):")
-monitorLabel.grid(column=1, row=1, sticky=tk.W)
-
-monitorEntry = ttk.Entry(interval_frame, width=5)
-monitorEntry.grid(column=2, row=1)
+monitorLabel.grid(column=1, row=2, sticky=tk.W)
+monitorEntry = ttk.Entry(interval_frame, width=3)
+monitorEntry.grid(column=2, row=2, sticky=tk.W)
 
 send_email_checkbox_var = tk.BooleanVar()
-
 send_email_checkbox = ttk.Checkbutton(interval_frame, variable=send_email_checkbox_var, command=enable_send_email)
-send_email_checkbox.grid(column=0, row=2)
-
+send_email_checkbox.grid(column=0, row=3)
 send_email_label = ttk.Label(interval_frame, text="Send Notification Email on crash")
-send_email_label.grid(column=1, row=2, sticky=tk.W)
+send_email_label.grid(column=1, row=3, sticky=tk.W)
 
 discordWebhookCheckbox_var = tk.BooleanVar()
-
 discordWebhookCheckbox = ttk.Checkbutton(interval_frame, variable=discordWebhookCheckbox_var, command=enable_send_discord_message)
-discordWebhookCheckbox.grid(column=0, row=3)
-
+discordWebhookCheckbox.grid(column=0, row=4)
 discordWebhookLabel = ttk.Label(interval_frame, text="Send Discord channel message on crash")
-discordWebhookLabel.grid(column=1, row=3, sticky=tk.W)
+discordWebhookLabel.grid(column=1, row=4, sticky=tk.W)
 
 ###################### Optional Configurations ###################################################
 
@@ -1100,20 +1338,24 @@ optional_config_frame = tk.LabelFrame(mainTab, text="Optional Configurations")
 optional_config_frame.grid(column=0, row=1, padx=10, pady=10, sticky=tk.NSEW)
 
 update_server_startup_checkbox_var = tk.BooleanVar()
-
 update_server_startup_checkbox = ttk.Checkbutton(optional_config_frame, variable=update_server_startup_checkbox_var, command=enable_server_updates_on_startup)
 update_server_startup_checkbox.grid(column=0, row=0)
-
 update_server_startup_label = ttk.Label(optional_config_frame, text="Check for updates on startup")
 update_server_startup_label.grid(column=1, row=0, sticky=tk.W)
 
 backup_server_checkbox_var = tk.BooleanVar()
-
 backup_server_checkbox = ttk.Checkbutton(optional_config_frame, variable=backup_server_checkbox_var, command=enable_server_backups)
 backup_server_checkbox.grid(column=0, row=1)
-
 backup_server_label = ttk.Label(optional_config_frame, text="Backup server during restart")
 backup_server_label.grid(column=1, row=1, sticky=tk.W)
+
+deleteOldBackupsCheckbox_var = tk.BooleanVar()
+deleteOldBackupsCheckbox = ttk.Checkbutton(optional_config_frame, variable=deleteOldBackupsCheckbox_var, command=enable_delete_backups)
+deleteOldBackupsCheckbox.grid(column=0, row=2)
+deleteOldBackupsLabel = ttk.Label(optional_config_frame, text="Delete Backups Older Than (Days):")
+deleteOldBackupsLabel.grid(column=1, row=2, sticky=tk.W)
+deleteOldBackupsEntry = ttk.Entry(optional_config_frame, width=3)
+deleteOldBackupsEntry.grid(column=2, row=2, sticky=tk.W)
 
 ###################### Server Functions ###################################################
 
@@ -1287,6 +1529,9 @@ discordLabel.grid(column=0, row=0, padx=10)
 
 discordEntry = ttk.Entry(discord_frame, width=35)
 discordEntry.grid(column=1, row=0)
+
+discordTestButton = ttk.Button(discord_frame, text="Send Test Message", command=send_discord_message)
+discordTestButton.grid(column=0, row=1, columnspan=2, pady=2)
 
 ###################### About Tab ###################################################
 

@@ -1,3 +1,12 @@
+Version 1.2.0
+- Cleaned up code
+- Fixed functions that were executing incorrectly and added better error handling
+- Added check for Monitor Interval being enabled for crash notications
+- Added a new feature to schedule restarts at a specific time
+NOTE: The restart interval and scheduled restarts features cannot both be enabled at the same time. After some testing this can potentially cause conflicts.
+- Added a Test button for the Discord webhook
+- Added a new feature to delete old backups
+
 Version 1.1.2
  - Cleaned up code
  - Fixed issue where directories weren't be read properly
