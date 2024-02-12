@@ -1,7 +1,14 @@
+Version 1.3.0
+- Added backup server interval
+- Added supporter frame in About Tab as a show of thanks to those who have donated
+- Moved the crash notifications features to the Optional Configurations frame
+- Fixed some grammatical errors throughout the application
+- Fixed ARRCON CMD Window popping up every minute
+
 Version 1.2.0
 - Cleaned up code
 - Fixed functions that were executing incorrectly and added better error handling
-- Added check for Monitor Interval being enabled for crash notications
+- Added check for Monitor Interval being enabled for crash notifications
 - Added a new feature to schedule restarts at a specific time
 NOTE: The restart interval and scheduled restarts features cannot both be enabled at the same time. After some testing this can potentially cause conflicts.
 - Added a Test button for the Discord webhook

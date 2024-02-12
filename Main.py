@@ -132,7 +132,7 @@ def server_status_info():
         results = server_check_update_commands()
         if results == "good":
             try:
-                process = subprocess.Popen(arrcon_command_info_server, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                process = subprocess.Popen(arrcon_command_info_server, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
 
                 stdout = process.communicate()
 
@@ -224,7 +224,6 @@ def save_server_interval(restartinterval):
         append_to_output(f"The Restart interval attempted to run, but the server is not running. This will automatically retry in {trueRestartTime} hour(s)")
         root.after(restartinterval, lambda: save_server_interval(restartinterval))
 
-# Function to shutdown the server
 def shutdown_server_interval(restartinterval):
     global after_id, current_function, scheduled_time
     current_function = "shutdown_server"
@@ -251,7 +250,6 @@ def scheduled_shutdown_server():
         current_function = ""
         append_to_output(f"Couldn't shutdown the server due to error: " + str(e))
 
-# Function to message the server
 def message_server_30(restartinterval):
     global after_id, current_function, scheduled_time
     current_function = "message_server_30"
@@ -264,7 +262,6 @@ def scheduled_message_server_30():
     subprocess.Popen(arrcon_command_server_message_30)
     after_id = root.after(20000, scheduled_message_server_10)
 
-# Function to message the server
 def message_server_10(restartinterval):
     global after_id, current_function, scheduled_time
     current_function = "message_server_10"
@@ -283,7 +280,6 @@ def scheduled_message_server_10():
     except Exception as e:
         append_to_output(f"Couldn't send message to the server due to error: " + str(e))
 
-# Function to restart the server
 def restart_server(restartinterval):
     global after_id, current_function, scheduled_time
     current_function = "restart_server"
@@ -603,7 +599,6 @@ def monitor_server(monitorinterval):
                 send_discord_message()
             monitor_after_id = root.after(monitorinterval, lambda: monitor_server(monitorinterval))
 
-# Function that monitors the server process and restarts it if it's not running
 def enable_monitor_server():
     global monitor_after_id
     server_check_results = server_check()
@@ -674,6 +669,35 @@ def disable_server_restart():
                 append_to_output("Server restart interval stopped.")
     except Exception as e:
         append_to_output("There was an error disabling the server restart interval due to error: " + str(e))
+
+def backup_server_interval(backupInterval):
+    global backup_after_id
+    backup_server()
+    backup_after_id = root.after(backupInterval, lambda: backup_server_interval(backupInterval))
+
+def enable_backup_interval():
+    global backup_after_id
+    server_check_results = server_check()
+    if server_check_results == "check good":
+        if not backup_directory_selection.cget("text") == "No directory selected":
+            try:
+                if backupIntervalCheckbox_var.get():
+                    backupInterval = int(backupIntervalEntry.get()) * 60 * 60 * 1000  # Convert to minutes and then to hours and then translate to milliseconds
+                    true_value = int(backupInterval / 1000 / 60 / 60)
+                    append_to_output(f"Backup Interval has been enabled. The server will be backed up every {true_value} hour(s)")
+                    backup_after_id = root.after(backupInterval, lambda: backup_server_interval(backupInterval))
+                else:
+                    root.after_cancel(backup_after_id)
+                    append_to_output("Backup Interval has been disabled.")
+            except ValueError:
+                append_to_output("Your backup interval cannot be empty and can only contain numerical values")
+                backupIntervalCheckbox_var.set(False)
+        else:
+            append_to_output("You must select a valid backup directory before using this feature")
+            backupIntervalCheckbox_var.set(False)
+    else:
+        append_to_output("Server check failed. Check the Server Config tab and be sure everything is configured first.")
+        backupIntervalCheckbox_var.set(False)
 
 def start_scheduler():
     schedule.run_pending()
@@ -826,25 +850,17 @@ def delete_old_backups():
     daysEntry = int(deleteOldBackupsEntry.get())
     append_to_output(str(daysEntry))
 
-    # Calculate the time 1 day ago
     days_ago = current_time - timedelta(days=daysEntry)
 
-    # Directory containing the files
     backup_dir = backup_directory_selection.cget("text")
 
-    # Iterate over the files in the directory
     for filename in os.listdir(backup_dir):
-        # Check if the file name starts with "palworld_backup_"
         if filename.startswith("palworld_backup_"):
-            # Get the full path of the file
             filepath = os.path.join(backup_dir, filename)
         
-            # Get the modification time of the file
             modification_time = datetime.fromtimestamp(os.path.getmtime(filepath))
         
-            # Compare the modification time with the time 1 day ago
             if modification_time < days_ago:
-                # Delete the file
                 os.remove(filepath)
                 append_to_output(f"Old backup deleted: {filepath}")
 
@@ -1312,7 +1328,6 @@ ampm_combobox = ttk.Combobox(interval_frame, textvariable=ampm_var, values=["AM"
 ampm_combobox.grid(column=3, row=1)
 
 monitor_interval_checkbox_var = tk.BooleanVar()
-
 monitor_interval_checkbox = ttk.Checkbutton(interval_frame, variable=monitor_interval_checkbox_var, command=enable_monitor_server)
 monitor_interval_checkbox.grid(column=0, row=2)
 monitorLabel = ttk.Label(interval_frame, text="Monitor Interval (minutes):")
@@ -1320,42 +1335,50 @@ monitorLabel.grid(column=1, row=2, sticky=tk.W)
 monitorEntry = ttk.Entry(interval_frame, width=3)
 monitorEntry.grid(column=2, row=2, sticky=tk.W)
 
-send_email_checkbox_var = tk.BooleanVar()
-send_email_checkbox = ttk.Checkbutton(interval_frame, variable=send_email_checkbox_var, command=enable_send_email)
-send_email_checkbox.grid(column=0, row=3)
-send_email_label = ttk.Label(interval_frame, text="Send Notification Email on crash")
-send_email_label.grid(column=1, row=3, sticky=tk.W)
-
-discordWebhookCheckbox_var = tk.BooleanVar()
-discordWebhookCheckbox = ttk.Checkbutton(interval_frame, variable=discordWebhookCheckbox_var, command=enable_send_discord_message)
-discordWebhookCheckbox.grid(column=0, row=4)
-discordWebhookLabel = ttk.Label(interval_frame, text="Send Discord channel message on crash")
-discordWebhookLabel.grid(column=1, row=4, sticky=tk.W)
+backupIntervalCheckbox_var = tk.BooleanVar()
+backupIntervalCheckbox = ttk.Checkbutton(interval_frame, variable=backupIntervalCheckbox_var, command=enable_backup_interval)
+backupIntervalCheckbox.grid(column=0, row=3)
+backupIntervalLabel = ttk.Label(interval_frame, text="Backup Server Interval (hours):")
+backupIntervalLabel.grid(column=1, row=3, sticky=tk.W)
+backupIntervalEntry = ttk.Entry(interval_frame, width=3)
+backupIntervalEntry.grid(column=2, row=3, sticky=tk.W)
 
 ###################### Optional Configurations ###################################################
 
 optional_config_frame = tk.LabelFrame(mainTab, text="Optional Configurations")
 optional_config_frame.grid(column=0, row=1, padx=10, pady=10, sticky=tk.NSEW)
 
+send_email_checkbox_var = tk.BooleanVar()
+send_email_checkbox = ttk.Checkbutton(optional_config_frame, variable=send_email_checkbox_var, command=enable_send_email)
+send_email_checkbox.grid(column=0, row=0)
+send_email_label = ttk.Label(optional_config_frame, text="Send Notification Email on crash")
+send_email_label.grid(column=1, row=0, sticky=tk.W)
+
+discordWebhookCheckbox_var = tk.BooleanVar()
+discordWebhookCheckbox = ttk.Checkbutton(optional_config_frame, variable=discordWebhookCheckbox_var, command=enable_send_discord_message)
+discordWebhookCheckbox.grid(column=0, row=1)
+discordWebhookLabel = ttk.Label(optional_config_frame, text="Send Discord channel message on crash")
+discordWebhookLabel.grid(column=1, row=1, sticky=tk.W)
+
 update_server_startup_checkbox_var = tk.BooleanVar()
 update_server_startup_checkbox = ttk.Checkbutton(optional_config_frame, variable=update_server_startup_checkbox_var, command=enable_server_updates_on_startup)
-update_server_startup_checkbox.grid(column=0, row=0)
+update_server_startup_checkbox.grid(column=0, row=2)
 update_server_startup_label = ttk.Label(optional_config_frame, text="Check for updates on startup")
-update_server_startup_label.grid(column=1, row=0, sticky=tk.W)
+update_server_startup_label.grid(column=1, row=2, sticky=tk.W)
 
 backup_server_checkbox_var = tk.BooleanVar()
 backup_server_checkbox = ttk.Checkbutton(optional_config_frame, variable=backup_server_checkbox_var, command=enable_server_backups)
-backup_server_checkbox.grid(column=0, row=1)
-backup_server_label = ttk.Label(optional_config_frame, text="Backup server during restart")
-backup_server_label.grid(column=1, row=1, sticky=tk.W)
+backup_server_checkbox.grid(column=0, row=3)
+backup_server_label = ttk.Label(optional_config_frame, text="Backup server during restarts")
+backup_server_label.grid(column=1, row=3, sticky=tk.W)
 
 deleteOldBackupsCheckbox_var = tk.BooleanVar()
 deleteOldBackupsCheckbox = ttk.Checkbutton(optional_config_frame, variable=deleteOldBackupsCheckbox_var, command=enable_delete_backups)
-deleteOldBackupsCheckbox.grid(column=0, row=2)
+deleteOldBackupsCheckbox.grid(column=0, row=4)
 deleteOldBackupsLabel = ttk.Label(optional_config_frame, text="Delete Backups Older Than (Days):")
-deleteOldBackupsLabel.grid(column=1, row=2, sticky=tk.W)
+deleteOldBackupsLabel.grid(column=1, row=4, sticky=tk.W)
 deleteOldBackupsEntry = ttk.Entry(optional_config_frame, width=3)
-deleteOldBackupsEntry.grid(column=2, row=2, sticky=tk.W)
+deleteOldBackupsEntry.grid(column=2, row=4, sticky=tk.W)
 
 ###################### Server Functions ###################################################
 
@@ -1538,7 +1561,7 @@ discordTestButton.grid(column=0, row=1, columnspan=2, pady=2)
 app_info_frame = tk.LabelFrame(aboutTab, text="Application Info")
 app_info_frame.grid(column=0, row=0, padx=10, pady=10, sticky=tk.N)
 
-app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.1.2")
+app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.3.0")
 app_version_label.grid(column=0, row=0, padx=10)
 
 app_update_button = ttk.Button(app_info_frame, text="Check for Updates", command=check_for_updates)
@@ -1563,6 +1586,13 @@ buy_me_beer_label.grid(column=0, row=1, columnspan=2, sticky=tk.NSEW)
 buy_me_beer_link = tk.Label(support_frame, text="https://www.buymeacoffee.com/thewisestguy", foreground="blue", cursor="hand2")
 buy_me_beer_link.grid(column=0, row=2, columnspan=2)
 buy_me_beer_link.bind("<Button-1>", open_BMAB)
+
+supporters_frame = tk.LabelFrame(aboutTab, text="Special Thanks to the Following Supporters:")
+supporters_frame.grid(column=0, row=2, padx=10, pady=10, sticky=tk.EW)
+supporters_frame.columnconfigure(0, weight=1)
+
+donations_label = ttk.Label(supporters_frame, justify="center", text="daisame.bsky.social, CBesty")
+donations_label.grid(column=0, row=0)
 
 
 
