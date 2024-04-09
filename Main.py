@@ -56,7 +56,7 @@ def load_settings():
             arrcon_directory_selection.config(text=settings.get("arrcon_directory_selection", "No directory selected"))
             steamcmd_directory_selection.config(text=settings.get("steamcmd_directory_selection", "No directory selected"))
             backup_directory_selection.config(text=settings.get("backup_directory_selection", "No directory selected"))
-            server_start_args_entry.insert(0, settings.get("server_start_args_entry", '-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS -EpicApp=PalServer'))
+            server_start_args_entry.insert(0, settings.get("server_start_args_entry", '-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS -publiclobby'))
             email_address_entry.insert(0, settings.get("email_address_entry", ""))
             discordEntry.insert(0, settings.get("discordEntry", ""))
             smtp_server_entry.insert(0, settings.get("smtp_server_entry", "smtp.gmail.com"))
@@ -125,7 +125,7 @@ def append_to_output(message):
     output_text.yview(tk.END)  # Auto-scroll to the bottom
 
 def server_status_info():
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     running_processes = [proc.name() for proc in psutil.process_iter()]
     if task_name in running_processes:
@@ -201,7 +201,7 @@ def shutdown_server(type):
 # Function to save the server during the restart interval
 def save_server_interval(restartinterval):
     global after_id, current_function, scheduled_time
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -288,7 +288,7 @@ def restart_server(restartinterval):
     if enable_backups == True:
             backup_server()
 
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -392,7 +392,7 @@ def scheduled_restart_server():
     if enable_backups == True:
             backup_server()
 
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -468,7 +468,7 @@ def kill_palworld_process():
     append_to_output("Palworld Server is shutdown. Checking for residual processes... Sometimes the server process gets stuck")
     root.update()
 
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -487,7 +487,7 @@ def kill_palworld_process():
         append_to_output("PalServer.exe is not running. The server is completely shutdown")
 
 def check_palworld_process():
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -552,7 +552,7 @@ def send_discord_message():
 
 def monitor_server(monitorinterval):
     global monitor_after_id
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -908,7 +908,7 @@ def start_server():
     if server_check_results == "check good":
         update_commands_results = update_commands()
         if update_commands_results == "commands updated":
-            task_name = "PalServer-Win64-Test-Cmd.exe"
+            task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
             # Get the list of running processes
             running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -947,7 +947,7 @@ def start_server():
 
 def graceful_shutdown():
     global current_function, scheduled_time
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -972,7 +972,7 @@ def graceful_shutdown():
 
 def force_shutdown():
     global current_function, scheduled_time
-    task_name = "PalServer-Win64-Test-Cmd.exe"
+    task_name = "PalServer-Win64-Shipping-Cmd.exe"
 
     # Get the list of running processes
     running_processes = [proc.name() for proc in psutil.process_iter()]
@@ -997,7 +997,7 @@ def force_shutdown():
 def update_palworld_server():
     if palworld_exe_result_label.cget("text") == "PalServer.exe detected":
         if steamcmd_exe_result_label.cget("text") == "steamcmd.exe detected":
-            task_name = "PalServer-Win64-Test-Cmd.exe"
+            task_name = "PalServer-Win64-Shipping-Cmd.exe"
             running_processes = [proc.name() for proc in psutil.process_iter()]
             if task_name not in running_processes:
                 palworld_directory = server_directory_selection.cget("text")
@@ -1030,7 +1030,7 @@ def update_palworld_server():
 def validate_palworld_server():
     if palworld_exe_result_label.cget("text") == "PalServer.exe detected":
         if steamcmd_exe_result_label.cget("text") == "steamcmd.exe detected":
-            task_name = "PalServer-Win64-Test-Cmd.exe"
+            task_name = "PalServer-Win64-Shipping-Cmd.exe"
             running_processes = [proc.name() for proc in psutil.process_iter()]
             if task_name not in running_processes:
                 palworld_directory = server_directory_selection.cget("text")
@@ -1561,7 +1561,7 @@ discordTestButton.grid(column=0, row=1, columnspan=2, pady=2)
 app_info_frame = tk.LabelFrame(aboutTab, text="Application Info")
 app_info_frame.grid(column=0, row=0, padx=10, pady=10, sticky=tk.N)
 
-app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.3.0")
+app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.4.0")
 app_version_label.grid(column=0, row=0, padx=10)
 
 app_update_button = ttk.Button(app_info_frame, text="Check for Updates", command=check_for_updates)
