@@ -67,7 +67,7 @@ def load_settings():
         arrcon_directory_selection.config(text="No directory selected", foreground="red")
         steamcmd_directory_selection.config(text="No directory selected", foreground="red")
         backup_directory_selection.config(text="No directory selected", foreground="red")
-        server_start_args_entry.insert(0, '-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS -EpicApp=PalServer')
+        server_start_args_entry.insert(0, '-useperfthreads -NoAsyncLoadingThread -UseMultithreadForDS -publiclobby')
         smtp_server_entry.insert(0, "smtp.gmail.com")
         smtp_port_entry.insert(0, "587")
 
@@ -1561,7 +1561,7 @@ discordTestButton.grid(column=0, row=1, columnspan=2, pady=2)
 app_info_frame = tk.LabelFrame(aboutTab, text="Application Info")
 app_info_frame.grid(column=0, row=0, padx=10, pady=10, sticky=tk.N)
 
-app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.4.0")
+app_version_label = ttk.Label(app_info_frame, text="Application Version: 1.4.1")
 app_version_label.grid(column=0, row=0, padx=10)
 
 app_update_button = ttk.Button(app_info_frame, text="Check for Updates", command=check_for_updates)
