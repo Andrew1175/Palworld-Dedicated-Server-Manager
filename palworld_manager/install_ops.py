@@ -20,7 +20,7 @@ def install_steamcmd_from_official_zip(parent_directory: Path) -> Path | None:
             return steamcmd_dir
         zip_path = steamcmd_dir / "steamcmd.zip"
         req = urllib.request.Request(
-            STEAMCMD_ZIP_URL, headers={"User-Agent": "Windrose-Server-Manager"}
+            STEAMCMD_ZIP_URL, headers={"User-Agent": "Palworld-Dedicated-Server-Manager"}
         )
         with urllib.request.urlopen(req, timeout=120) as resp:
             zip_path.write_bytes(resp.read())

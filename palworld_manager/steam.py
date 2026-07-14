@@ -70,7 +70,6 @@ def get_steam_library_roots(install_root: Path | None) -> list[Path]:
                     roots.append(Path(raw))
         except OSError:
             pass
-    # unique preserve order
     out: list[Path] = []
     seen: set[str] = set()
     for r in roots:
@@ -81,20 +80,29 @@ def get_steam_library_roots(install_root: Path | None) -> list[Path]:
     return out
 
 
-def find_windrose_server_in_libraries(library_roots: list[Path]) -> Path | None:
+def _is_palworld_server_dir(path: Path) -> bool:
+    if (path / "PalServer.exe").is_file():
+        return True
+    cmd = (
+        path
+        / "Pal"
+        / "Binaries"
+        / "Win64"
+        / "PalServer-Win64-Shipping-Cmd.exe"
+    )
+    return cmd.is_file()
+
+
+def find_palworld_server_in_libraries(library_roots: list[Path]) -> Path | None:
     exact_suffixes = [
-        Path(r"steamapps\common\Windrose\R5\Builds\WindowsServer"),
-        Path(r"steamapps\common\Windrose Dedicated Server\R5\Builds\WindowsServer"),
-        Path(r"steamapps\common\Windrose\Builds\WindowsServer"),
-        Path(r"steamapps\common\Windrose Dedicated Server\Builds\WindowsServer"),
-        Path(r"steamapps\common\Windrose\WindowsServer"),
-        Path(r"steamapps\common\Windrose Dedicated Server\WindowsServer"),
+        Path(r"steamapps\common\PalServer"),
+        Path(r"steamapps\common\Palworld Dedicated Server"),
     ]
     for lib in library_roots:
         lib = lib.resolve()
         for suf in exact_suffixes:
             p = lib / suf
-            if (p / "WindroseServer.exe").is_file():
+            if _is_palworld_server_dir(p):
                 return p
         common = lib / "steamapps" / "common"
         if not common.is_dir():
@@ -103,14 +111,12 @@ def find_windrose_server_in_libraries(library_roots: list[Path]) -> Path | None:
             for app_dir in common.iterdir():
                 if not app_dir.is_dir():
                     continue
-                for candidate in (
-                    app_dir / "R5" / "Builds" / "WindowsServer" / "WindroseServer.exe",
-                    app_dir / "Builds" / "WindowsServer" / "WindroseServer.exe",
-                    app_dir / "WindowsServer" / "WindroseServer.exe",
-                ):
-                    if candidate.is_file():
-                        return candidate.parent
-                for hit in app_dir.rglob("WindroseServer.exe"):
+                if _is_palworld_server_dir(app_dir):
+                    return app_dir
+                for hit in app_dir.rglob("PalServer-Win64-Shipping-Cmd.exe"):
+                    if hit.is_file():
+                        return hit.parent.parent.parent.parent
+                for hit in app_dir.rglob("PalServer.exe"):
                     if hit.is_file():
                         return hit.parent
         except OSError:
@@ -118,7 +124,7 @@ def find_windrose_server_in_libraries(library_roots: list[Path]) -> Path | None:
     return None
 
 
-def find_steam_windrose(
+def find_steam_palworld(
     client: str,
     *,
     steam_install_root: Path | None,
@@ -126,12 +132,8 @@ def find_steam_windrose(
     steamcmd_force_install_dir: Path | None,
 ) -> Path | None:
     if client == "SteamCMD":
-        if steamcmd_force_install_dir:
-            fr = steamcmd_force_install_dir
-            if (fr / "WindroseServer.exe").is_file():
-                return fr
-            if (fr / "R5" / "Binaries" / "Win64" / "WindroseServer-Win64-Shipping.exe").is_file():
-                return fr
+        if steamcmd_force_install_dir and _is_palworld_server_dir(steamcmd_force_install_dir):
+            return steamcmd_force_install_dir
         cmd_root = steamcmd_install_root
         roots_set: dict[str, Path] = {}
         if cmd_root:
@@ -141,11 +143,11 @@ def find_steam_windrose(
             for r in get_steam_library_roots(steamcmd_force_install_dir):
                 roots_set[str(r).lower()] = r
         if roots_set:
-            return find_windrose_server_in_libraries(list(roots_set.values()))
+            return find_palworld_server_in_libraries(list(roots_set.values()))
         return None
 
     steam_root = steam_install_root
     if not steam_root:
         return None
     libs = get_steam_library_roots(steam_root)
-    return find_windrose_server_in_libraries(libs)
+    return find_palworld_server_in_libraries(libs)

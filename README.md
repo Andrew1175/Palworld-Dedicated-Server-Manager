@@ -1,67 +1,84 @@
-# Windrose Server Manager Enhanced
+# Palworld Dedicated Server Manager
 
-An Open Source dedicated server manager for [Windrose](https://store.steampowered.com/app/3041230/Windrose/)
+An open-source dedicated server manager for [Palworld](https://store.steampowered.com/app/1623730/Palworld/).
 
 ---
 
 ## Features
 
-- **Steam and SteamCMD support** - With ability to switch on-demand
-- **Guided Installation Wizard** — When first launching the Server Manager you will be guided on how to get your dedicated server up and running via Steam or SteamCMD
-- **Discord Integration** - Send notifications to a Discord channel when the server starts, stops, restarts, schedules a restart, or crashes
+- **No Install Needed** — Just download and run the Server Manager
+- **Steam and SteamCMD support** — Switch between install methods on demand
+- **Guided Installation Wizard** — First-launch setup for Steam or SteamCMD
+- **Discord Integration** — Webhook notifications for start, stop, restart, schedule, and crash events
 - **One-click Start / Stop / Restart**
-- **Automated Game Server Updater**
-- **Automated Server Manager Updater**
-- **Live dashboard** — CPU usage, RAM, player count, uptime, and connected player list
+- **Automated game server updater**
+- **Automated server manager updater**
+- **Live dashboard** — CPU, RAM, player count, uptime, and connected player list via the Palworld REST API
 - **Live Insights**
-    - Player Activity - See individual player information.
-    - Most Active Times - See when your server is most active. Complete with a 24 hour graph!
-- **Live log viewer** — color-coded, filterable (All / Players / Warnings / Errors) with auto-scroll toggle
-- **Config editor** — Edit Server and Gameplay settings directly from the manager
-- **One-click world backup** — Zip your save data to a timestamped archive
-- **Auto-backup** — Schedule automatic backups at customized times (Hours or Minutes)
-- **Scheduled daily restarts**
-- **Auto-restart on crash** — Relaunches automatically if the server is not running
-- **Player history** — Persistent log of who joined and left
-- **Invite code share** — Copies a ready-to-send message to clipboard
+  - Player Activity — Individual player session totals
+  - Most Active Times — 24-hour activity graph
+- **REST API Support** — Send and receive all REST API commands and view them directly in the Server Manager
+- **Live log viewer** — WIP
+- **Config editor** — Edit `PalWorldSettings.ini` from the manager
+- **Launch arguments** — Configure Palworld server startup flags
+- **One-click world backup** — Timestamped save archives
+- **Auto-backup** — Scheduled backups in hours or minutes
+- **Scheduled daily restarts** - With automated messages prior to the restart
+- **Auto-restart on crash**
+- **Player history** — Persistent join/leave log
+
 ---
 
 ## Requirements
 
 - Windows 10 or Windows 11
 - Steam or SteamCMD
+- Palworld Dedicated Server (Steam App ID `2394010`)
 
 ---
 
-### How to Run
+## How to Run
 
-1. **Download the latest version** - https://github.com/Andrew1175/Windrose-Server-Manager-Enhanced/releases/latest. Do not download the debug version unless you're encountering issues.
-2. Extract the .zip to a folder of your choice. Be sure to keep all contents in the .zip together:
-    - Windrose-Server-Manager.exe
-    - _internal (Folder)
-3. **Run `Windrose-Server-Manager.exe`**
-4. Follow the Setup Wizard to configure a new dedicated server or to use your pre-existing one.
-5. Click **Install Server** — Only if using SteamCMD.
-6. Switch to the **Dashboard** tab and click **Start**.
+1. **Download the latest release** from [GitHub Releases](https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager/releases/latest).
+2. Extract the `.zip` to a folder of your choice. Keep all contents together:
+   - `Palworld-Dedicated-Server-Manager.exe`
+   - `_internal` (folder)
+   - `palworld_logo.ico`
+3. **Run `Palworld-Dedicated-Server-Manager.exe`**
+4. Follow the Setup Wizard to configure a new dedicated server or use an existing install.
+5. Click **Install Server** if using SteamCMD.
+6. Open the **Dashboard** tab and click **Start**.
+
+## REST API
+
+You MUST enable the REST API for this Server Manager to function. This should be done automatically when you run the manager.
+
+```ini
+RESTAPIEnabled=True
+RESTAPIPort=8212
+AdminPassword="your-admin-password"
+```
+
+See the [Palworld REST API docs](https://docs.palworldgame.com/category/rest-api) for details.
 
 ---
 
 ## Screenshots
 
-| Dashboard                          | Insights                       |
-| ---------------------------------- | ---------------------------- |
+| Dashboard | Insights |
+| --- | --- |
 | ![Dashboard](Images/Dashboard.png) | ![Insights](Images/Insights.png) |
 
-| Config                    | Log                    |
-| ---------------------- | ---------------------- |
-| ![Config](Images/Config.png) | ![Log](Images/Log.png) |
+| Config | Commands |
+| --- | --- |
+| ![Config](Images/Config.png) | ![Commands](Images/Commands.png) |
 
-| Tools                    |                     |
-| ---------------------- | ---------------------- |
-| ![Tools](Images/Tools.png) |  |
+| Tools | Install |
+| --- | --- |
+| ![Tools](Images/Tools.png) | ![Install](Images/Install.png) |
 
 ---
 
-## Contributers
+## Contributors
 
-Original GUI Design By: (https://github.com/psbrowand/Windrose-Server-Manager)
+Original GUI design adapted from [Windrose Server Manager](https://github.com/psbrowand/Windrose-Server-Manager).

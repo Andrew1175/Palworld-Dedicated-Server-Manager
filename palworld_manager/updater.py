@@ -14,8 +14,10 @@ from pathlib import Path
 
 from . import constants
 
-_USER_AGENT = "Windrose-Server-Manager"
-_ZIP_NAME_RE = re.compile(r"^Windrose-Server-Manager-v\d+(?:\.\d+)+\.zip$", re.IGNORECASE)
+_USER_AGENT = "Palworld-Dedicated-Server-Manager"
+_ZIP_NAME_RE = re.compile(
+    r"^Palworld-Dedicated-Server-Manager-v\d+(?:\.\d+)+\.zip$", re.IGNORECASE
+)
 
 
 def parse_version(v: str) -> tuple[int, ...]:
@@ -66,9 +68,9 @@ def _http_bytes(url: str) -> tuple[bytes | None, str | None]:
 
 
 def _pick_release_zip_asset(assets: list, tag_name: str) -> tuple[str | None, str | None]:
-    """Return (semver_version, browser_download_url) for Windrose-Server-Manager-vx.x.x.zip."""
+    """Return (semver_version, browser_download_url) for Palworld-Dedicated-Server-Manager-vx.x.x.zip."""
     tag_norm = tag_name.lstrip("vV") if tag_name else ""
-    expected = f"Windrose-Server-Manager-v{tag_norm}.zip"
+    expected = f"Palworld-Dedicated-Server-Manager-v{tag_norm}.zip"
     for a in assets:
         name = a.get("name") or ""
         if name.lower() == expected.lower():
@@ -117,7 +119,7 @@ def run_update_pipeline(local_version: str, status_callback) -> dict:
     if not zip_url or not remote_ver:
         return {
             "ok": False,
-            "error": "Could not find Windrose-Server-Manager-vx.x.x.zip in the latest GitHub release.",
+            "error": "Could not find Palworld-Dedicated-Server-Manager-vx.x.x.zip in the latest GitHub release.",
         }
 
     if not is_remote_newer(remote_ver, local_version):
@@ -151,6 +153,22 @@ def _rmtree_quiet(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+def _resolve_powershell() -> Path | None:
+    """Locate powershell.exe without relying on PATH (often broken in custom shells)."""
+    system_root = os.environ.get("SystemRoot") or os.environ.get("WINDIR") or r"C:\Windows"
+    candidates = [
+        Path(system_root) / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+        Path(system_root) / "SysWOW64" / "WindowsPowerShell" / "v1.0" / "powershell.exe",
+        Path(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"),
+    ]
+    for path in candidates:
+        if path.is_file():
+            return path
+    # Last resort: ask the OS (still may fail if PATH is empty).
+    found = shutil.which("powershell.exe") or shutil.which("powershell")
+    return Path(found) if found else None
+
+
 def spawn_deferred_update(payload_dir: Path, staging_root: Path) -> tuple[bool, str | None]:
     """
     Start a detached PowerShell helper that waits for this process to exit, copies the
@@ -158,6 +176,14 @@ def spawn_deferred_update(payload_dir: Path, staging_root: Path) -> tuple[bool, 
     """
     if os.name != "nt":
         return False, "In-app updates are only supported on Windows."
+
+    powershell = _resolve_powershell()
+    if powershell is None:
+        return (
+            False,
+            "Could not find powershell.exe. Expected it under "
+            r"%SystemRoot%\System32\WindowsPowerShell\v1.0\.",
+        )
 
     install_dir = get_manager_install_dir()
     if getattr(sys, "frozen", False):
@@ -169,7 +195,7 @@ def spawn_deferred_update(payload_dir: Path, staging_root: Path) -> tuple[bool, 
         py = Path(sys.executable).resolve()
         root = install_dir
         restart_exe = str(py)
-        restart_args = "-m windrose_manager"
+        restart_args = "-m palworld_manager"
         restart_cwd = str(root)
 
     cfg = {
@@ -236,7 +262,7 @@ function Launch-PreviousAndNotify {
     Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
     [System.Windows.MessageBox]::Show(
       "There was an error during the update process. Please review the update-helper.log for more information.",
-      "Windrose Server Manager Update Error",
+      "Palworld Dedicated Server Manager Update Error",
       [System.Windows.MessageBoxButton]::OK,
       [System.Windows.MessageBoxImage]::Error
     ) | Out-Null
@@ -313,7 +339,7 @@ Remove-Item -LiteralPath $selfPath -Force -ErrorAction SilentlyContinue
     try:
         subprocess.Popen(
             [
-                "powershell.exe",
+                str(powershell),
                 "-NoProfile",
                 "-NonInteractive",
                 "-ExecutionPolicy",
@@ -334,6 +360,6 @@ Remove-Item -LiteralPath $selfPath -Force -ErrorAction SilentlyContinue
             Path(ps1_path).unlink()
         except OSError:
             pass
-        return False, str(e)
+        return False, f"{e} (tried: {powershell})"
 
     return True, None

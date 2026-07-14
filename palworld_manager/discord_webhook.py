@@ -8,8 +8,8 @@ from . import constants
 
 # Discord/Cloudflare often returns 403 for the default Python-urllib User-Agent.
 _USER_AGENT = (
-    f"WindroseServerManager/{constants.APP_VERSION} "
-    "(+https://github.com/Andrew1175/Windrose-Server-Manager-Enhanced)"
+    f"PalworldDedicatedServerManager/{constants.APP_VERSION} "
+    "(+https://github.com/Andrew1175/Palworld-Dedicated-Server-Manager)"
 )
 
 _ALLOWED = (

@@ -1,17 +1,17 @@
-"""Launch Windrose Server Manager (tkinter). Double-click or: python run_manager.py"""
+"""Launch Palworld Server Manager (tkinter). Double-click or: python run_manager.py"""
 
 from __future__ import annotations
 
 import tkinter as tk
 from pathlib import Path
 
-from windrose_manager.main_window import WindroseServerManagerApp
+from palworld_manager.main_window import PalworldServerManagerApp
 
 
 def main() -> None:
     root = tk.Tk()
     initial = Path(__file__).resolve().parent
-    WindroseServerManagerApp(root, initial)
+    PalworldServerManagerApp(root, initial)
     root.mainloop()
 
 

@@ -3,25 +3,34 @@ from __future__ import annotations
 import json
 import ctypes
 import os
+import queue
 import re
+import shlex
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from queue import Empty
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 import psutil
 
-from . import config_io, constants, discord_webhook, install_ops, players, process_ops, settings, steam, updater
+from . import config_io, config_form, constants, discord_webhook, install_ops, players, process_ops, rest_api, settings, steam, updater
 from .backup import backup_saves_now, find_latest_backup
 from .paths import ServerPaths
 from .settings import ClientInstallSettings, ManagerSettings
-from .ui_theme import apply_dark_theme, tk_button
+from .ui_theme import apply_dark_theme, HoverToolTip, tk_button
+
+_CONFIG_REQUIRED_MSG = (
+    "PalWorldSettings.ini is missing or empty. Open the Config tab and click "
+    "Save Config once to generate it before starting the server."
+)
 
 
 def _app_package_dir() -> Path:
@@ -31,14 +40,14 @@ def _app_package_dir() -> Path:
 def _bootstrap_client_settings_path() -> Path:
     # Keep a launcher-level copy so startup can remember server root
     # even before we know which server directory to bind paths to.
-    return _app_package_dir().parent / "windrose_client_settings.json"
+    return _app_package_dir().parent / "palworld_client_settings.json"
 
 
 def _isolated_dedicated_server_env(working_dir: str) -> dict[str, str]:
     """
     A deliberately minimal environment for the dedicated server child process.
 
-    Inheriting the full parent environment can let `WindroseServer-Win64-Shipping.exe` resolve
+    Inheriting the full parent environment can let `PalServer-Win64-Shipping-Cmd.exe` resolve
     MSVC runtimes (e.g. VCRUNTIME140.dll) from the Server Manager's PyInstaller `_internal`
     directory (via PATH / DLL search), which then locks those files and breaks Server Manager
     self-updates while the server is running.
@@ -99,46 +108,7 @@ def _restore_windows_dll_directory_after_child_launch(meipass: object | None) ->
         pass
 
 
-class HoverToolTip:
-    def __init__(self, widget: tk.Widget, text: str):
-        self.widget = widget
-        self.text = text
-        self.tip: tk.Toplevel | None = None
-        widget.bind("<Enter>", self._show, add="+")
-        widget.bind("<Leave>", self._hide, add="+")
-
-    def _show(self, _event=None) -> None:
-        if not self.text.strip():
-            return
-        if self.tip:
-            return
-        x = self.widget.winfo_rootx() + 16
-        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 8
-        self.tip = tk.Toplevel(self.widget)
-        self.tip.wm_overrideredirect(True)
-        self.tip.geometry(f"+{x}+{y}")
-        lbl = tk.Label(
-            self.tip,
-            text=self.text,
-            bg="#1A2A3A",
-            fg="#C0CDD8",
-            bd=1,
-            relief=tk.SOLID,
-            padx=8,
-            pady=5,
-            wraplength=520,
-            justify=tk.LEFT,
-            font=(None, 10),
-        )
-        lbl.pack()
-
-    def _hide(self, _event=None) -> None:
-        if self.tip:
-            self.tip.destroy()
-            self.tip = None
-
-
-class WindroseServerManagerApp:
+class PalworldServerManagerApp:
     def __init__(self, root: tk.Tk, initial_server_dir: Path) -> None:
         self.root = root
         self.paths = ServerPaths(initial_server_dir)
@@ -150,10 +120,11 @@ class WindroseServerManagerApp:
         self.start_time: datetime | None = None
         self.prev_cpu_time: float | None = None
         self.prev_cpu_check: datetime | None = None
-        self.max_players = 10
+        self.max_players = 32
         self.log_position = 0
         self.log_buffer: list[str] = []
         self.log_filter = "All"
+        self._console_log_queue: queue.Queue[str] = queue.Queue()
         self.online_players: set[str] = set()
         self.account_to_player: dict[str, str] = {}
         self.last_player_snapshot = ""
@@ -166,8 +137,10 @@ class WindroseServerManagerApp:
         self._active_times_tooltip_label: tk.Label | None = None
         self.watchdog_tick = 0
         self.last_schedule_date: date | None = None
-        self._poll_invite_after: str | None = None
-        self._poll_invite_count = 0
+        self._schedule_warn_sent: set[int] = set()
+        self._schedule_prev_secs: float | None = None
+        self._rest_api_poll_count = 0
+        self._server_version_label = "--"
         self._install_thread: threading.Thread | None = None
         self._auto_backup_after: str | None = None
         self._wizard_bodies: list[tk.Frame] = []
@@ -179,23 +152,24 @@ class WindroseServerManagerApp:
         self._restart_pending = False
         self._stop_pending = False
         self._stop_pending_logged = False
+        self._start_blocked_reason: str | None = None
 
         apply_dark_theme(root)
-        root.title("Windrose Server Manager")
+        root.title("Palworld Server Manager")
         # Wide enough for two-column Tools (App/Hosting, Backup/Schedule) without clipping.
         root.minsize(760, 660)
         root.geometry("920x820")
         try:
             candidates: list[Path] = []
             # Source run: project root
-            candidates.append(_app_package_dir().parent / "WindroseServerManager.ico")
+            candidates.append(_app_package_dir().parent / "palworld_logo.ico")
             # Frozen run: executable directory (onedir)
             if getattr(sys, "frozen", False):
-                candidates.append(Path(sys.executable).resolve().parent / "WindroseServerManager.ico")
+                candidates.append(Path(sys.executable).resolve().parent / "palworld_logo.ico")
             # PyInstaller extraction dir (onefile / fallback)
             meipass = getattr(sys, "_MEIPASS", None)
             if meipass:
-                candidates.append(Path(meipass) / "WindroseServerManager.ico")
+                candidates.append(Path(meipass) / "palworld_logo.ico")
             for icon_path in candidates:
                 if icon_path.is_file():
                     root.iconbitmap(default=str(icon_path))
@@ -235,7 +209,7 @@ class WindroseServerManagerApp:
         row1 = tk.Frame(left, bg=c["bg_header"])
         row1.pack(anchor="w")
         self.lbl_server_title = tk.Label(
-            row1, text="Windrose Server", font=(None, 16, "bold"), fg=c["accent"], bg=c["bg_header"]
+            row1, text="Palworld Server", font=(None, 16, "bold"), fg=c["accent"], bg=c["bg_header"]
         )
         self.lbl_server_title.pack(side=tk.LEFT)
         self.lbl_status = tk.Label(
@@ -246,15 +220,15 @@ class WindroseServerManagerApp:
         self.lbl_uptime_hdr.pack(side=tk.LEFT, padx=(16, 0))
         row2 = tk.Frame(left, bg=c["bg_header"])
         row2.pack(anchor="w", pady=(6, 0))
-        tk.Label(row2, text="Code:", fg=c["text_muted"], bg=c["bg_header"], font=(None, 9)).pack(side=tk.LEFT)
-        self.lbl_invite = tk.Label(
+        tk.Label(row2, text="Game Version:", fg=c["text_muted"], bg=c["bg_header"], font=(None, 9)).pack(side=tk.LEFT)
+        self.lbl_server_info = tk.Label(
             row2, text="--", fg="#A0C4E0", bg=c["bg_header"], font=(None, 9), cursor="hand2"
         )
-        self.lbl_invite.pack(side=tk.LEFT, padx=(6, 0))
+        self.lbl_server_info.pack(side=tk.LEFT, padx=(6, 0))
 
         right = tk.Frame(hdr, bg=c["bg_header"])
         right.grid(row=0, column=1, sticky="e")
-        tk_button(right, "Share", self._on_share, bg=c["blue_btn"], small=True).pack()
+        tk_button(right, "Invite", self._on_share, bg=c["blue_btn"], small=True).pack()
 
         # Notebook
         self.nb = ttk.Notebook(root)
@@ -264,13 +238,14 @@ class WindroseServerManagerApp:
         self._build_tab_insights()
         self._build_tab_config()
         self._build_tab_log()
+        self._build_tab_commands()
         self._build_tab_tools()
         self._build_tab_install()
         self._build_tab_help()
 
         self.lbl_version_corner = tk.Label(
             root,
-            text=f"Version: {constants.APP_VERSION}",
+            text=f"Server Manager Version: {constants.APP_VERSION}",
             fg=c["text_muted"],
             bg=c["bg"],
             font=(None, 10),
@@ -286,6 +261,7 @@ class WindroseServerManagerApp:
             foot.columnconfigure(i, weight=1)
         self.btn_start = tk_button(foot, "Start", self._on_start, bg=c["green_btn"])
         self.btn_start.grid(row=0, column=0, padx=2, sticky="ew")
+        self.tip_start = HoverToolTip(self.btn_start, "")
         self.btn_stop = tk_button(foot, "Stop", self._on_stop, bg=c["red_btn"])
         self.btn_stop.grid(row=0, column=1, padx=2, sticky="ew")
         self.btn_stop.config(state=tk.DISABLED)
@@ -312,6 +288,45 @@ class WindroseServerManagerApp:
             if self.nb.tab(tab_id, "text") == "Tools":
                 self.nb.select(tab_id)
                 return
+
+    def _select_install_tab(self) -> None:
+        for tab_id in self.nb.tabs():
+            if self.nb.tab(tab_id, "text") == "Install":
+                self.nb.select(tab_id)
+                return
+
+    def _select_config_tab(self) -> None:
+        for tab_id in self.nb.tabs():
+            if self.nb.tab(tab_id, "text") == "Config":
+                self.nb.select(tab_id)
+                return
+
+    def _apply_start_button_state(self) -> None:
+        if "Running" in self.lbl_status.cget("text"):
+            return
+        if not self.paths.server_installed():
+            self.btn_start.config(state=tk.DISABLED)
+            self.tip_start.text = ""
+            if self._start_blocked_reason == "config":
+                self._start_blocked_reason = None
+            return
+        if not config_io.is_server_config_ready(self.paths):
+            self.btn_start.config(state=tk.DISABLED)
+            self.tip_start.text = _CONFIG_REQUIRED_MSG
+            self.lbl_cfg_status.config(text=_CONFIG_REQUIRED_MSG, fg=self.c["accent"])
+            self.log(_CONFIG_REQUIRED_MSG)
+            if self._start_blocked_reason != "config":
+                self._start_blocked_reason = "config"
+                self._select_config_tab()
+            return
+        self.btn_start.config(state=tk.NORMAL)
+        self.tip_start.text = ""
+        if self._start_blocked_reason == "config":
+            self._start_blocked_reason = None
+        if self.lbl_cfg_status.cget("text") == _CONFIG_REQUIRED_MSG:
+            self.lbl_cfg_status.config(text="", fg=self.c["green"])
+        if self.lbl_footer_log.cget("text") == _CONFIG_REQUIRED_MSG:
+            self.log("Ready.")
 
     def _bind_mousewheel(self, canvas: tk.Canvas) -> None:
         def _on_mousewheel(event):
@@ -516,7 +531,6 @@ class WindroseServerManagerApp:
 
         pad = tk.Frame(inner, bg=self.c["bg"])
         pad.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
-        self._last_world_settings_enabled = False
         self.lbl_config_lock = tk.Label(
             pad,
             text=(
@@ -529,138 +543,25 @@ class WindroseServerManagerApp:
             wraplength=640,
             justify=tk.LEFT,
         )
-        self._hdr_server_settings = ttk.Label(pad, text="Server Settings", style="Section.TLabel")
-        self._hdr_server_settings.pack(anchor="w")
         self.lbl_config_lock.pack_forget()
 
-        sf = self._panel_frame(pad)
-        sf.pack(fill=tk.X, pady=(0, 8))
-        sf_inner = tk.Frame(sf, bg=self.c["bg_panel"])
-        sf_inner.pack(fill=tk.X, padx=12, pady=10)
-        lbl_server_name = tk.Label(sf_inner, text="Server Name", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_server_name.grid(row=0, column=0, sticky="w")
-        self.ent_srv_name = ttk.Entry(sf_inner, width=50)
-        self.ent_srv_name.grid(row=0, column=1, sticky="ew", pady=4)
-        lbl_invite_code = tk.Label(sf_inner, text="Invite Code", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_invite_code.grid(row=1, column=0, sticky="w")
-        self.ent_invite_code = ttk.Entry(sf_inner, width=50)
-        self.ent_invite_code.grid(row=1, column=1, sticky="ew", pady=4)
-        lbl_max_players = tk.Label(sf_inner, text="Max Players", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_max_players.grid(row=2, column=0, sticky="w")
-        mx = tk.Frame(sf_inner, bg=self.c["bg_panel"])
-        mx.grid(row=2, column=1, sticky="ew", pady=4)
-        self.scale_max = tk.Scale(mx, from_=1, to=20, orient=tk.HORIZONTAL, showvalue=0, bg=self.c["bg_panel"], fg=self.c["accent"], highlightthickness=0, troughcolor=self.c["border_input"])
-        self.scale_max.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.lbl_max_val = tk.Label(mx, text="10", fg=self.c["accent"], bg=self.c["bg_panel"], font=(None, 11, "bold"), width=3)
-        self.lbl_max_val.pack(side=tk.LEFT)
-        lbl_password = tk.Label(sf_inner, text="Password", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_password.grid(row=3, column=0, sticky="w")
-        pwf = tk.Frame(sf_inner, bg=self.c["bg_panel"])
-        pwf.grid(row=3, column=1, sticky="ew", pady=4)
-        self.var_pw_en = tk.BooleanVar(value=False)
-        self.chk_pw_en = ttk.Checkbutton(
-            pwf, text="Enable", variable=self.var_pw_en, command=self._toggle_pw_entry
-        )
-        self.chk_pw_en.pack(side=tk.LEFT, padx=(0, 8))
-        self.ent_password = ttk.Entry(pwf, width=40, show="*")
-        self.ent_password.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.ent_password.config(state=tk.DISABLED)
-        self.btn_reveal_password = tk_button(pwf, "Reveal", small=True)
-        self.btn_reveal_password.pack(side=tk.LEFT, padx=(6, 0))
-        self.btn_reveal_password.bind("<ButtonPress-1>", self._on_pw_reveal_press)
-        self.btn_reveal_password.bind("<ButtonRelease-1>", self._on_pw_reveal_release)
-        self.btn_reveal_password.bind("<Leave>", self._on_pw_reveal_release)
-        self.btn_reveal_password.config(state=tk.DISABLED)
-        lbl_proxy = tk.Label(sf_inner, text="Proxy Address", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_proxy.grid(row=4, column=0, sticky="w")
-        self.ent_proxy = ttk.Entry(sf_inner, width=50)
-        self.ent_proxy.grid(row=4, column=1, sticky="ew", pady=4)
-        self.ent_proxy.insert(0, "127.0.0.1")
-        lbl_conn_port = tk.Label(sf_inner, text="Connection Port", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_conn_port.grid(row=5, column=0, sticky="w")
-        self.ent_direct_port = ttk.Entry(sf_inner, width=12)
-        self.ent_direct_port.grid(row=5, column=1, sticky="w", pady=4)
-        self.ent_direct_port.insert(0, "7777")
-        sf_inner.columnconfigure(1, weight=1)
-        HoverToolTip(lbl_server_name, "This is the name of the server that players will see")
-        HoverToolTip(lbl_invite_code, "Invite code to find your server. 0-9, a-z and A-Z symbols are allowed. Should contain at least 6 symbols. Case sensitive.")
-        HoverToolTip(lbl_max_players, "The amount of players that are allowed to join your server")
-        HoverToolTip(lbl_password, "Specify if password is required. Should be toggled on if password specified and toggled off if password field is empty. Otherwise it may cause unexpected behavior.")
-        HoverToolTip(lbl_proxy, "The IP that will be used to host the server. Default: 127.0.0.1 (This computer IP)")
-        HoverToolTip(lbl_conn_port, "The port that is used to connect to your server. Default: 7777")
+        self.config_form = config_form.ConfigForm(self)
+        self.config_form.set_player_max_callback(self._on_max_players_slide_value)
+        self.config_form.build(pad)
+        self._hdr_server_settings = self.config_form.first_section_header
 
-        ttk.Label(pad, text="World Settings", style="Section.TLabel").pack(anchor="w", pady=(12, 0))
-        wf = self._panel_frame(pad)
-        wf.pack(fill=tk.X)
-        wi = tk.Frame(wf, bg=self.c["bg_panel"])
-        wi.pack(fill=tk.X, padx=12, pady=10)
-        self.lbl_world_missing = tk.Label(
-            wi,
-            text=(
-                "World settings are unavailable until the server has generated a world.\n"
-                "Start the server once, click Reload Saved Config until this message disappears, and then stop the server."
-            ),
-            fg=self.c["red"],
-            bg=self.c["bg_panel"],
-            font=(None, 10),
-            justify=tk.LEFT,
-            wraplength=520,
-        )
-        self.lbl_world_missing.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
-        lbl_preset = tk.Label(wi, text="Difficulty Preset", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_preset.grid(row=1, column=0, sticky="w")
-        self.cmb_preset = ttk.Combobox(wi, values=("Easy", "Medium", "Hard", "Custom"), state="readonly", width=20)
-        self.cmb_preset.grid(row=1, column=1, sticky="w", pady=4)
-        self.cmb_preset.set("Medium")
-        self.frame_custom = tk.Frame(wi, bg="#0D1820")
-        self.frame_custom.grid(row=2, column=0, columnspan=2, sticky="ew", pady=6, padx=10, ipadx=8, ipady=8)
-        self._world_sliders: dict[str, tuple[tk.Scale, tk.Label]] = {}
-        labels_tooltips = [
-            ("mob_health", "Mob Health", 0.2, 5.0, "Enemy creature health multiplier."),
-            ("mob_damage", "Mob Damage", 0.2, 5.0, "Damage dealt by enemy creatures."),
-            ("ship_health", "Ship Health", 0.4, 5.0, "Enemy ship hull strength."),
-            ("ship_damage", "Ship Damage", 0.2, 2.5, "Damage dealt by enemy ships."),
-            ("boarding", "Boarding", 0.2, 5.0, "Boarding encounter difficulty."),
-            ("coop_stats", "Coop Stats", 0.0, 2.0, "Enemy stat scaling per extra player."),
-            ("coop_ship", "Coop Ship", 0.0, 2.0, "Enemy ship scaling per extra player."),
-        ]
-        for i, (key, title, lo, hi, tip) in enumerate(labels_tooltips):
-            lbl_custom = tk.Label(self.frame_custom, text=title, bg="#0D1820", fg=self.c["text_dim"])
-            lbl_custom.grid(row=i, column=0, sticky="w", pady=2)
-            sc = tk.Scale(self.frame_custom, from_=lo, to=hi, resolution=0.1, orient=tk.HORIZONTAL, length=220, bg="#0D1820", fg=self.c["accent"], highlightthickness=0, troughcolor=self.c["border_input"])
-            sc.set(1.0)
-            sc.grid(row=i, column=1, sticky="ew", padx=6)
-            vl = tk.Label(self.frame_custom, text="1.0", fg=self.c["accent"], bg="#0D1820", width=5)
-            vl.grid(row=i, column=2)
-            self._world_sliders[key] = (sc, vl)
-            custom_tips = {
-                "mob_health": "Defines how much Health enemies have; Default: 1.0",
-                "mob_damage": "Defines how hard enemies hit; Default: 1.0",
-                "ship_health": "Defines how much Ship Health enemy ships have; Default: 1.0",
-                "ship_damage": "Defines how much Damage enemy ships deal; Default: 1.0",
-                "boarding": "Defines how many enemy sailors must be defeated to win a boarding action; Default: 1.0",
-                "coop_stats": "Adjusts enemy Health and how fast enemies lose Posture based on the number of players on the server; Default: 1.0",
-                "coop_ship": "Adjusts enemy Ship Health based on the number of players on the server; Default: 0.0",
-            }
-            HoverToolTip(lbl_custom, custom_tips.get(key, ""))
-        self.frame_custom.columnconfigure(1, weight=1)
-        self.frame_custom.grid_remove()
-
-        lbl_combat = tk.Label(wi, text="Combat Diff.", bg=self.c["bg_panel"], fg=self.c["text_dim"])
-        lbl_combat.grid(row=3, column=0, sticky="w")
-        self.cmb_combat = ttk.Combobox(wi, values=("Easy", "Normal", "Hard"), state="readonly", width=18)
-        self.cmb_combat.grid(row=3, column=1, sticky="w", pady=4)
-        self.cmb_combat.set("Normal")
-        self.var_coop_quests = tk.BooleanVar(value=False)
-        self.var_easy_explore = tk.BooleanVar(value=False)
-        self.chk_coop_quests = ttk.Checkbutton(wi, text="Coop Quests", variable=self.var_coop_quests)
-        self.chk_coop_quests.grid(row=4, column=1, sticky="w")
-        self.chk_easy_explore = ttk.Checkbutton(wi, text="Easy Exploration", variable=self.var_easy_explore)
-        self.chk_easy_explore.grid(row=5, column=1, sticky="w")
-        HoverToolTip(lbl_preset, "Adjusts predefined world challenge settings. Use Custom to tune each slider manually.")
-        HoverToolTip(lbl_combat, "Defines how difficult boss encounters are and how aggressive enemies are in general; Default: Normal")
-        HoverToolTip(self.chk_coop_quests, "If any player on the server completes a quest marked as a co-op quest, it auto-completes for all players who currently have it active; Default: true")
-        HoverToolTip(self.chk_easy_explore, "When this option is enabled it disables markers on the map that highlight points of interest making them harder to find; Default: false")
+        self.ent_srv_name = self.config_form.get_entry("ServerName")
+        self.ent_password = self.config_form.get_entry("ServerPassword")
+        self.ent_admin_password = self.config_form.get_entry("AdminPassword")
+        self.ent_direct_port = self.config_form.get_entry("PublicPort")
+        self.ent_rest_api_port = self.config_form.get_entry("RESTAPIPort")
+        self.scale_max = self.config_form.get_scale("ServerPlayerMaxNum")
+        self.ent_launch_args = self.config_form.launch_args_entry
+        self.var_rest_api_en = self.config_form.bindings["RESTAPIEnabled"].var
+        self.chk_rest_api_en = self.config_form.bindings["RESTAPIEnabled"].widget
+        self.lbl_max_val = self.config_form.bindings["ServerPlayerMaxNum"].value_label
+        self.btn_reveal_password = self.config_form.bindings["ServerPassword"].reveal_btn
+        self.btn_reveal_admin_password = self.config_form.bindings["AdminPassword"].reveal_btn
 
         bf = tk.Frame(pad, bg=self.c["bg"])
         bf.pack(fill=tk.X, pady=12)
@@ -670,14 +571,17 @@ class WindroseServerManagerApp:
         self.btn_cfg_reload.pack(side=tk.LEFT, padx=2)
         self.btn_cfg_open_server = tk_button(bf, "Open Server Config", self._on_open_server_config, bg=self.c["blue_btn"])
         self.btn_cfg_open_server.pack(side=tk.LEFT, padx=2)
-        self.btn_cfg_open_world = tk_button(bf, "Open World Config", self._on_open_world_json, bg=self.c["blue_btn"])
-        self.btn_cfg_open_world.pack(side=tk.LEFT, padx=2)
         self.lbl_cfg_status = tk.Label(pad, text="", fg=self.c["green"], bg=self.c["bg"], font=(None, 10))
         self.lbl_cfg_status.pack(anchor="w", pady=4)
 
     def _build_tab_log(self) -> None:
         tab = tk.Frame(self.nb, bg=self.c["bg"])
-        self.nb.add(tab, text="Log")
+        self._log_tab = tab
+        self._log_tab_tip: tk.Toplevel | None = None
+        # Console capture into this tab is WIP; use the visible PalServer console for now.
+        self.nb.add(tab, text="Log", state="disabled")
+        self.nb.bind("<Motion>", self._on_notebook_motion_log_tip, add="+")
+        self.nb.bind("<Leave>", self._on_notebook_leave_log_tip, add="+")
         tab.columnconfigure(0, weight=1)
         tab.rowconfigure(1, weight=1)
         top = tk.Frame(tab, bg=self.c["bg"])
@@ -707,6 +611,333 @@ class WindroseServerManagerApp:
         xs = ttk.Scrollbar(tab, orient=tk.HORIZONTAL, command=self.txt_log.xview)
         xs.grid(row=2, column=0, sticky="ew", padx=10)
         self.txt_log.config(xscrollcommand=xs.set)
+
+    def _log_tab_under_pointer(self, event: tk.Event) -> bool:
+        try:
+            idx = self.nb.index(f"@{event.x},{event.y}")
+        except tk.TclError:
+            return False
+        tabs = self.nb.tabs()
+        if idx < 0 or idx >= len(tabs):
+            return False
+        return tabs[idx] == str(self._log_tab)
+
+    def _on_notebook_motion_log_tip(self, event: tk.Event) -> None:
+        if not self._log_tab_under_pointer(event):
+            self._hide_log_tab_tip()
+            return
+        if self._log_tab_tip is not None:
+            return
+        tip = tk.Toplevel(self.nb)
+        tip.wm_overrideredirect(True)
+        tip.geometry(f"+{event.x_root + 12}+{event.y_root + 16}")
+        tk.Label(
+            tip,
+            text="WIP",
+            bg="#1A2A3A",
+            fg="#C0CDD8",
+            bd=1,
+            relief=tk.SOLID,
+            padx=8,
+            pady=5,
+            font=(None, 10),
+        ).pack()
+        self._log_tab_tip = tip
+
+    def _on_notebook_leave_log_tip(self, _event: tk.Event | None = None) -> None:
+        self._hide_log_tab_tip()
+
+    def _hide_log_tab_tip(self) -> None:
+        if self._log_tab_tip is not None:
+            self._log_tab_tip.destroy()
+            self._log_tab_tip = None
+
+    def _build_tab_commands(self) -> None:
+        tab = tk.Frame(self.nb, bg=self.c["bg"])
+        self.nb.add(tab, text="Commands")
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(2, weight=1)
+
+        self._cmd_defs: list[dict] = [
+            {
+                "key": "info",
+                "label": "Get Server Info",
+                "fields": (),
+                "docs": "https://docs.palworldgame.com/api/rest-api/info",
+            },
+            {
+                "key": "players",
+                "label": "Get Player List",
+                "fields": (),
+                "docs": "https://docs.palworldgame.com/api/rest-api/players",
+            },
+            {
+                "key": "settings",
+                "label": "Get Server Settings",
+                "fields": (),
+                "docs": "https://docs.palworldgame.com/api/rest-api/settings",
+            },
+            {
+                "key": "metrics",
+                "label": "Get Server Metrics",
+                "fields": (),
+                "docs": "https://docs.palworldgame.com/api/rest-api/metrics",
+            },
+            {
+                "key": "announce",
+                "label": "Announce Message",
+                "fields": ("message",),
+                "docs": "https://docs.palworldgame.com/api/rest-api/announce",
+            },
+            {
+                "key": "kick",
+                "label": "Kick Player",
+                "fields": ("userid", "message_optional"),
+                "docs": "https://docs.palworldgame.com/api/rest-api/kick",
+            },
+            {
+                "key": "ban",
+                "label": "Ban Player",
+                "fields": ("userid", "message_optional"),
+                "docs": "https://docs.palworldgame.com/api/rest-api/ban",
+            },
+            {
+                "key": "unban",
+                "label": "Unban Player",
+                "fields": ("userid",),
+                "docs": "https://docs.palworldgame.com/api/rest-api/unban",
+            },
+            {
+                "key": "save",
+                "label": "Save World",
+                "fields": (),
+                "docs": "https://docs.palworldgame.com/api/rest-api/save",
+            },
+        ]
+        self._cmd_by_label = {d["label"]: d for d in self._cmd_defs}
+        self._cmd_userid_choices: dict[str, str] = {}
+
+        top = tk.Frame(tab, bg=self.c["bg"])
+        top.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        top.columnconfigure(1, weight=1)
+        ttk.Label(top, text="Command").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.var_cmd = tk.StringVar(value=self._cmd_defs[0]["label"])
+        self.cmb_cmd = ttk.Combobox(
+            top,
+            textvariable=self.var_cmd,
+            values=[d["label"] for d in self._cmd_defs],
+            state="readonly",
+            width=28,
+        )
+        self.cmb_cmd.grid(row=0, column=1, sticky="w")
+        self.cmb_cmd.bind("<<ComboboxSelected>>", lambda _e: self._on_command_selected())
+        self.btn_cmd_send = tk_button(top, "Send", self._on_command_send, bg=self.c["green_btn"])
+        self.btn_cmd_send.grid(row=0, column=2, sticky="e", padx=(12, 0))
+
+        self.frm_cmd_fields = tk.Frame(tab, bg=self.c["bg"])
+        self.frm_cmd_fields.grid(row=1, column=0, sticky="ew", padx=12, pady=6)
+        self.frm_cmd_fields.columnconfigure(1, weight=1)
+
+        self.lbl_cmd_message = ttk.Label(self.frm_cmd_fields, text="Message")
+        self.ent_cmd_message = ttk.Entry(self.frm_cmd_fields)
+        self.lbl_cmd_userid = ttk.Label(self.frm_cmd_fields, text="User ID")
+        self.cmb_cmd_userid = ttk.Combobox(self.frm_cmd_fields)
+        self.lbl_cmd_hint = tk.Label(
+            self.frm_cmd_fields,
+            text="",
+            fg=self.c["text_muted"],
+            bg=self.c["bg"],
+            font=(None, 9),
+            wraplength=720,
+            justify=tk.LEFT,
+            anchor="w",
+        )
+
+        result_wrap = tk.Frame(tab, bg=self.c["bg"])
+        result_wrap.grid(row=2, column=0, sticky="nsew", padx=12, pady=(6, 12))
+        result_wrap.columnconfigure(0, weight=1)
+        result_wrap.rowconfigure(1, weight=1)
+        ttk.Label(result_wrap, text="Result", style="Section.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 4))
+        self.txt_cmd_result = tk.Text(
+            result_wrap,
+            bg="#111E2A",
+            fg="#C0CDD8",
+            font=("Consolas", 10),
+            wrap=tk.WORD,
+            borderwidth=0,
+            highlightthickness=1,
+            highlightbackground=self.c["border"],
+        )
+        self.txt_cmd_result.grid(row=1, column=0, sticky="nsew")
+        ys = ttk.Scrollbar(result_wrap, command=self.txt_cmd_result.yview)
+        ys.grid(row=1, column=1, sticky="ns")
+        self.txt_cmd_result.config(yscrollcommand=ys.set)
+        self.txt_cmd_result.insert("1.0", "Select a command and click Send.\n")
+        self.txt_cmd_result.config(state=tk.DISABLED)
+
+        self._on_command_selected()
+
+    def _on_command_selected(self) -> None:
+        cmd = self._cmd_by_label.get(self.var_cmd.get())
+        fields = cmd["fields"] if cmd else ()
+        for w in (
+            self.lbl_cmd_message,
+            self.ent_cmd_message,
+            self.lbl_cmd_userid,
+            self.cmb_cmd_userid,
+            self.lbl_cmd_hint,
+        ):
+            w.grid_forget()
+        row = 0
+        if "userid" in fields:
+            self.lbl_cmd_userid.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
+            self.cmb_cmd_userid.grid(row=row, column=1, sticky="ew", pady=3)
+            row += 1
+            self._refresh_command_userid_choices()
+            self.lbl_cmd_hint.config(
+                text="Pick an online player or type a userId (e.g. steam_...). Kick/Ban/Unban use userid."
+            )
+            self.lbl_cmd_hint.grid(row=row, column=0, columnspan=2, sticky="ew", pady=(0, 4))
+            row += 1
+        if "message" in fields or "message_optional" in fields:
+            label = "Message" if "message" in fields else "Message (optional)"
+            self.lbl_cmd_message.config(text=label)
+            self.lbl_cmd_message.grid(row=row, column=0, sticky="w", padx=(0, 8), pady=3)
+            self.ent_cmd_message.grid(row=row, column=1, sticky="ew", pady=3)
+
+    def _refresh_command_userid_choices(self) -> None:
+        choices: list[str] = []
+        mapping: dict[str, str] = {}
+        for name in sorted(self.online_players):
+            # Prefer a matching userId if we recently fetched player rows.
+            uid = self._cmd_userid_choices.get(name, "")
+            label = f"{name} ({uid})" if uid else name
+            choices.append(label)
+            mapping[label] = uid or name
+        self.cmb_cmd_userid["values"] = choices
+        # Keep free-text entry allowed.
+        self.cmb_cmd_userid.configure(state="normal")
+
+    def _resolve_command_userid(self) -> str:
+        raw = self.cmb_cmd_userid.get().strip()
+        if not raw:
+            return ""
+        if raw in self._cmd_userid_choices.values():
+            return raw
+        # Label form: "Name (userid)" or bare userid / name
+        if raw.endswith(")") and "(" in raw:
+            inner = raw[raw.rfind("(") + 1 : -1].strip()
+            if inner:
+                return inner
+        # Map display name -> userid when known
+        for name, uid in self._cmd_userid_choices.items():
+            if raw == name and uid:
+                return uid
+        return raw
+
+    def _set_command_result(self, text: str) -> None:
+        self.txt_cmd_result.config(state=tk.NORMAL)
+        self.txt_cmd_result.delete("1.0", tk.END)
+        self.txt_cmd_result.insert("1.0", text)
+        self.txt_cmd_result.config(state=tk.DISABLED)
+
+    def _format_command_result(self, data: object, err: str | None) -> str:
+        if err:
+            return f"Error:\n{err}"
+        try:
+            return json.dumps(data, indent=2, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(data)
+
+    def _on_command_send(self) -> None:
+        cmd = self._cmd_by_label.get(self.var_cmd.get())
+        if not cmd:
+            return
+        enabled, api_port, admin_pw = config_io.read_rest_api_config(self.paths)
+        if not enabled:
+            self._set_command_result("REST API is disabled. Enable RESTAPIEnabled in Config and restart the server.")
+            self.log("REST API is disabled.")
+            return
+        if not admin_pw:
+            self._set_command_result("Admin password is not set. Set AdminPassword in Config.")
+            self.log("Admin password is not set.")
+            return
+        if not process_ops.get_server_process():
+            self._set_command_result("Server is not running.")
+            self.log("Server is not running.")
+            return
+
+        fields = cmd["fields"]
+        message = self.ent_cmd_message.get().strip()
+        userid = self._resolve_command_userid()
+        if "message" in fields and not message:
+            self._set_command_result("Message is required for Announce.")
+            return
+        if "userid" in fields and not userid:
+            self._set_command_result("User ID is required.")
+            return
+
+        key = cmd["key"]
+        self.btn_cmd_send.config(state=tk.DISABLED)
+        self._set_command_result(f"Sending {cmd['label']}...")
+        self.log(f"Commands: sending {cmd['label']}...")
+
+        def worker() -> None:
+            data: object = None
+            err: str | None = None
+            try:
+                if key == "info":
+                    data, err = rest_api.get_server_info("127.0.0.1", api_port, admin_pw)
+                elif key == "players":
+                    rows, err = rest_api.get_players("127.0.0.1", api_port, admin_pw)
+                    data = {"players": rows}
+                    if not err:
+                        mapping = {
+                            rest_api.player_display_name(p): rest_api.player_user_id(p)
+                            for p in rows
+                            if rest_api.player_user_id(p)
+                        }
+                        self.root.after(0, lambda m=mapping: self._store_cmd_userid_map(m))
+                elif key == "settings":
+                    data, err = rest_api.get_server_settings("127.0.0.1", api_port, admin_pw)
+                elif key == "metrics":
+                    data, err = rest_api.get_server_metrics("127.0.0.1", api_port, admin_pw)
+                elif key == "announce":
+                    data, err = rest_api.announce_message("127.0.0.1", api_port, admin_pw, message)
+                elif key == "kick":
+                    data, err = rest_api.kick_player(
+                        "127.0.0.1", api_port, admin_pw, userid, message
+                    )
+                elif key == "ban":
+                    data, err = rest_api.ban_player(
+                        "127.0.0.1", api_port, admin_pw, userid, message
+                    )
+                elif key == "unban":
+                    data, err = rest_api.unban_player("127.0.0.1", api_port, admin_pw, userid)
+                elif key == "save":
+                    data, err = rest_api.save_world("127.0.0.1", api_port, admin_pw)
+                else:
+                    err = f"Unknown command: {key}"
+            except Exception as e:
+                err = str(e)
+            text = self._format_command_result(data, err)
+            self.root.after(0, lambda t=text, e=err, label=cmd["label"]: self._finish_command_send(t, e, label))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _store_cmd_userid_map(self, mapping: dict[str, str]) -> None:
+        self._cmd_userid_choices.update(mapping)
+        self._refresh_command_userid_choices()
+
+    def _finish_command_send(self, text: str, err: str | None, label: str) -> None:
+        self.btn_cmd_send.config(state=tk.NORMAL)
+        self._set_command_result(text)
+        if err:
+            self.log(f"Commands: {label} failed.")
+        else:
+            self.log(f"Commands: {label} OK.")
+            if label in ("Kick Player", "Ban Player", "Announce Message", "Save World"):
+                self._refresh_player_list()
 
     def _build_tab_tools(self) -> None:
         tab = tk.Frame(self.nb, bg=self.c["bg"])
@@ -803,9 +1034,38 @@ class WindroseServerManagerApp:
         sf.pack(anchor="w")
         self.var_schedule = tk.BooleanVar(value=False)
         ttk.Checkbutton(sf, text="Enable daily restart at", variable=self.var_schedule).pack(side=tk.LEFT)
-        self.ent_schedule_time = ttk.Entry(sf, width=8)
-        self.ent_schedule_time.insert(0, "04:00")
-        self.ent_schedule_time.pack(side=tk.LEFT, padx=6)
+        self.cmb_schedule_hour = ttk.Combobox(
+            sf, values=[str(h) for h in range(1, 13)], width=3, state="readonly"
+        )
+        self.cmb_schedule_hour.set("4")
+        self.cmb_schedule_hour.pack(side=tk.LEFT, padx=(6, 2))
+        tk.Label(sf, text=":", fg=self.c["text"], bg=self.c["bg_panel"], font=(None, 11)).pack(side=tk.LEFT)
+        self.cmb_schedule_minute = ttk.Combobox(
+            sf,
+            values=[f"{m:02d}" for m in range(60)],
+            width=3,
+            state="readonly",
+        )
+        self.cmb_schedule_minute.set("00")
+        self.cmb_schedule_minute.pack(side=tk.LEFT, padx=2)
+        self.cmb_schedule_ampm = ttk.Combobox(sf, values=["AM", "PM"], width=4, state="readonly")
+        self.cmb_schedule_ampm.set("AM")
+        self.cmb_schedule_ampm.pack(side=tk.LEFT, padx=(4, 0))
+        for w in (self.cmb_schedule_hour, self.cmb_schedule_minute, self.cmb_schedule_ampm):
+            w.bind("<<ComboboxSelected>>", lambda _e: self._save_settings())
+        tk.Label(
+            s,
+            text=(
+                "Uses graceful Shutdown API. With the server running, announce warnings "
+                "are sent at 30, 20, 15, 10, 5, and 1 minute(s) before restart."
+            ),
+            fg=self.c["text_muted"],
+            bg=self.c["bg_panel"],
+            font=(None, 9),
+            wraplength=340,
+            justify=tk.LEFT,
+            anchor="w",
+        ).pack(anchor="w", pady=(6, 0))
         auto_restart_tip = (
             "This will only Auto-Restart the server if the Server Manager detects an unexpected crash. "
             "If you manually stop the server you will need to manually start it again."
@@ -903,7 +1163,7 @@ class WindroseServerManagerApp:
         bi = tk.Frame(ban, bg=self.c["bg_panel"])
         bi.pack(fill=tk.X, padx=12, pady=10)
         tk.Label(bi, text="Server Setup", font=(None, 12, "bold"), fg=self.c["accent"], bg=self.c["bg_panel"]).pack(anchor="w")
-        tk.Label(bi, text="Follow these steps to get your Windrose dedicated server running.", fg=self.c["text_dim"], bg=self.c["bg_panel"], font=(None, 10), wraplength=520, justify=tk.LEFT).pack(anchor="w", pady=4)
+        tk.Label(bi, text="Follow these steps to get your Palworld dedicated server running.", fg=self.c["text_dim"], bg=self.c["bg_panel"], font=(None, 10), wraplength=520, justify=tk.LEFT).pack(anchor="w", pady=4)
         st = tk.Frame(bi, bg=self.c["bg_panel"])
         st.pack(anchor="e")
         self.canvas_install = tk.Canvas(st, width=14, height=14, bg=self.c["bg_panel"], highlightthickness=0)
@@ -922,7 +1182,7 @@ class WindroseServerManagerApp:
         s1 = self._wizard_bodies[0]
         self.lbl_req_help = tk.Label(
             s1,
-            text="Windrose must be installed via Steam (App ID 4129620). The dedicated server files are bundled inside the game - no separate download needed.",
+            text="Palworld must be installed via Steam (App ID 2394010). Install the Palworld Dedicated Server app from Steam.",
             fg=self.c["text_dim"],
             bg=self.c["bg_panel"],
             font=(None, 10),
@@ -1069,38 +1329,9 @@ class WindroseServerManagerApp:
         self._step_headers.append((badge, st))
 
     def _wire_events(self) -> None:
-        self.lbl_invite.bind("<Button-1>", lambda e: self._copy_invite())
-        self.scale_max.config(command=self._on_max_players_slide)
-        self.cmb_preset.bind("<<ComboboxSelected>>", lambda e: self._on_preset_change())
-        for key, (sc, lbl) in self._world_sliders.items():
-            sc.config(command=lambda v, l=lbl, s=sc: l.config(text=f"{float(s.get()):.1f}"))
+        self.lbl_server_info.bind("<Button-1>", lambda e: self._copy_server_info())
 
-    def _toggle_pw_entry(self) -> None:
-        if self.var_pw_en.get():
-            self.ent_password.config(state=tk.NORMAL)
-            self.btn_reveal_password.config(state=tk.NORMAL)
-        else:
-            # Keep masked text visible when disabled, but prevent editing.
-            self.ent_password.config(state="readonly")
-            self.btn_reveal_password.config(state=tk.DISABLED)
-            self.ent_password.config(show="*")
-
-    def _on_pw_reveal_press(self, _event=None) -> None:
-        if str(self.ent_password.cget("state")) == "normal":
-            self.ent_password.config(show="")
-
-    def _on_pw_reveal_release(self, _event=None) -> None:
-        self.ent_password.config(show="*")
-
-    def _on_preset_change(self) -> None:
-        if self.cmb_preset.get() == "Custom":
-            self.frame_custom.grid()
-        else:
-            self.frame_custom.grid_remove()
-
-    def _on_max_players_slide(self, v) -> None:
-        n = int(round(float(v)))
-        self.lbl_max_val.config(text=str(n))
+    def _on_max_players_slide_value(self, n: int) -> None:
         self.max_players = n
 
     def log(self, msg: str) -> None:
@@ -1115,14 +1346,19 @@ class WindroseServerManagerApp:
         proc = process_ops.get_server_process()
         ui_running = "Running" in self.lbl_status.cget("text")
         if self._stop_pending and not proc:
-            # Intentional stop completed; do not treat as crash.
+            # Graceful/manual stop finished; do not treat as a crash.
             self._stop_pending = False
             self._stop_pending_logged = False
-        if proc and not ui_running:
+            self.server_popen = None
+            self.start_time = None
+            if ui_running:
+                self._set_ui_stopped()
+                self.log("Server stopped.")
+        elif proc and not ui_running:
             if self._stop_pending:
                 # Stop was requested; ignore this short shutdown window.
                 if not self._stop_pending_logged:
-                    self.log("Manual stop in progress...")
+                    self.log("Shutdown in progress...")
                     self._stop_pending_logged = True
             else:
                 self._set_ui_running()
@@ -1130,7 +1366,8 @@ class WindroseServerManagerApp:
                     self.start_time = datetime.now()
         elif proc and ui_running:
             self._update_stats(proc)
-            if self.watchdog_tick % 10 == 0:
+            # Poll often enough that join/leave history stays reasonably timely.
+            if self.watchdog_tick % 2 == 0:
                 self._refresh_player_list()
         elif not proc and ui_running:
             if self._restart_pending:
@@ -1147,14 +1384,18 @@ class WindroseServerManagerApp:
                     self.log("Auto-restarting...")
                     self._do_restart("crash")
         if self.var_schedule.get():
+            self._tick_scheduled_restart_warnings(proc)
             now_hm = datetime.now().strftime("%H:%M")
-            target = self.ent_schedule_time.get().strip()
+            target = self._get_schedule_time_24h()
             today = date.today()
-            if now_hm == target and self.last_schedule_date != today:
+            if target and now_hm == target and self.last_schedule_date != today:
                 self.last_schedule_date = today
                 self.log("Scheduled daily restart.")
                 self._do_restart("schedule")
-        if self.paths.server_exe.is_file():
+        else:
+            self._schedule_prev_secs = None
+            self._schedule_warn_sent.clear()
+        if self.paths.server_installed():
             self.canvas_install.itemconfig(self._install_dot, fill="#00FF00")
             self.lbl_install_status.config(text="Server installed.", fg=self.c["green"])
         # Keep Config tab lock state in sync with real process state, including
@@ -1163,8 +1404,57 @@ class WindroseServerManagerApp:
         self._apply_install_update_button_state()
 
     def _schedule_log_tail(self) -> None:
-        self._update_log_viewer()
-        self.root.after(3000, self._schedule_log_tail)
+        self._drain_console_log_queue()
+        self.root.after(200, self._schedule_log_tail)
+
+    def _drain_console_log_queue(self) -> None:
+        while True:
+            try:
+                line = self._console_log_queue.get_nowait()
+            except Empty:
+                break
+            self._append_console_log_line(line)
+
+    def _append_console_log_line(self, line: str, *, persist: bool = True) -> None:
+        """Append one console line to buffer and Log tab UI."""
+        text = line.rstrip("\r\n")
+        if not text:
+            return
+        self.log_buffer.append(text)
+        while len(self.log_buffer) > 5000:
+            self.log_buffer.pop(0)
+        if persist:
+            try:
+                with open(self.paths.log_path, "a", encoding="utf-8", errors="replace") as f:
+                    f.write(text + "\n")
+            except OSError:
+                pass
+
+        def hist_join(n: str) -> None:
+            self._on_player_join(n)
+            self._add_history(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] JOINED: {n}"
+            )
+
+        def hist_leave(n: str, sfx: str) -> None:
+            self._on_player_leave(n)
+            self._add_history(
+                f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] LEFT: {n}{sfx}"
+            )
+
+        players.process_log_line_for_players(
+            text,
+            online=self.online_players,
+            account_to_player=self.account_to_player,
+            on_join_history=hist_join,
+            on_leave_history=hist_leave,
+        )
+        if self._test_log_filter(text, self.log_filter):
+            self.txt_log.insert(tk.END, text + "\n", self._log_line_tag(text))
+            while int(self.txt_log.index("end-1c").split(".")[0]) > 1000:
+                self.txt_log.delete("1.0", "2.0")
+            if self.var_autoscroll_log.get():
+                self.txt_log.see(tk.END)
 
     def _set_ui_running(self) -> None:
         self.canvas_status.itemconfig(self._status_dot, fill="#00FF00")
@@ -1172,59 +1462,46 @@ class WindroseServerManagerApp:
         self.btn_start.config(state=tk.DISABLED)
         self.btn_stop.config(state=tk.NORMAL)
         self.btn_restart.config(state=tk.NORMAL)
-        code = config_io.read_invite_code(self.paths)
-        self.lbl_invite.config(text=code if code else "(pending...)")
+        self._rest_api_poll_count = 0
+        self._poll_rest_api()
         self._apply_config_tab_state()
 
     def _set_ui_stopped(self) -> None:
+        # Anyone still listed as online left when the server stopped.
+        self._apply_online_player_names(set(), record_history=True)
         self._close_open_insight_sessions()
         self.canvas_status.itemconfig(self._status_dot, fill=self.c["status_stopped"])
         self.lbl_status.config(text="  Stopped", fg=self.c["text_dim"])
-        self.btn_start.config(state=tk.NORMAL)
         self.btn_stop.config(state=tk.DISABLED)
         self.btn_restart.config(state=tk.DISABLED)
-        self.lbl_invite.config(text="--")
+        self.lbl_server_info.config(text="--")
         self._reset_stats()
         self._apply_config_tab_state()
+        self._apply_start_button_state()
 
     def _apply_config_tab_state(self) -> None:
         """While the dedicated server is running, block all Config tab changes."""
         if process_ops.get_server_process():
-            self.lbl_config_lock.pack(anchor="w", pady=(0, 8), before=self._hdr_server_settings)
-            for w in (self.ent_srv_name, self.ent_invite_code, self.ent_proxy, self.ent_direct_port):
-                w.config(state="disabled")
-            self.scale_max.config(state=tk.DISABLED)
-            self.chk_pw_en.state(["disabled"])
-            self.ent_password.config(state="disabled")
-            self.btn_reveal_password.config(state=tk.DISABLED)
-            self.cmb_preset.config(state="disabled")
-            self.cmb_combat.config(state="disabled")
-            for sc, _vl in self._world_sliders.values():
-                sc.config(state=tk.DISABLED)
-            self.chk_coop_quests.state(["disabled"])
-            self.chk_easy_explore.state(["disabled"])
+            if self.config_form.first_section_header is not None:
+                self.lbl_config_lock.pack(
+                    anchor="w", pady=(0, 8), before=self.config_form.first_section_header
+                )
+            self.config_form.set_enabled(False)
             for b in (
                 self.btn_cfg_save,
                 self.btn_cfg_reload,
                 self.btn_cfg_open_server,
-                self.btn_cfg_open_world,
             ):
                 b.config(state=tk.DISABLED)
             return
         self.lbl_config_lock.pack_forget()
-        for w in (self.ent_srv_name, self.ent_invite_code, self.ent_proxy, self.ent_direct_port):
-            w.config(state=tk.NORMAL)
-        self.scale_max.config(state=tk.NORMAL)
-        self.chk_pw_en.state(["!disabled"])
-        self._toggle_pw_entry()
+        self.config_form.set_enabled(True)
         for b in (
             self.btn_cfg_save,
             self.btn_cfg_reload,
             self.btn_cfg_open_server,
-            self.btn_cfg_open_world,
         ):
             b.config(state=tk.NORMAL)
-        self._set_world_settings_enabled(self._last_world_settings_enabled)
 
     def _reset_stats(self) -> None:
         self.lbl_cpu.config(text="--")
@@ -1306,6 +1583,7 @@ class WindroseServerManagerApp:
         return "def"
 
     def _update_log_viewer(self) -> None:
+        # Used when attaching to a session that already wrote manager_console.log.
         lp = self.paths.log_path
         if not lp.is_file():
             return
@@ -1317,39 +1595,9 @@ class WindroseServerManagerApp:
             if not chunk:
                 return
             text = chunk.decode("utf-8", errors="replace")
-            new_lines = [ln for ln in text.splitlines() if ln]
-            if not new_lines and text.endswith("\n"):
-                pass
-            for line in new_lines:
-                self.log_buffer.append(line)
-
-                def hist_join(n: str) -> None:
-                    self._on_player_join(n)
-                    self._add_history(
-                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] JOINED: {n}"
-                    )
-
-                def hist_leave(n: str, sfx: str) -> None:
-                    self._on_player_leave(n)
-                    self._add_history(
-                        f"[{datetime.now().strftime('%Y-%m-%d %H:%M')}] LEFT: {n}{sfx}"
-                    )
-
-                players.process_log_line_for_players(
-                    line,
-                    online=self.online_players,
-                    account_to_player=self.account_to_player,
-                    on_join_history=hist_join,
-                    on_leave_history=hist_leave,
-                )
-                if self._test_log_filter(line, self.log_filter):
-                    self.txt_log.insert(tk.END, line + "\n", self._log_line_tag(line))
-            while len(self.log_buffer) > 1000:
-                self.log_buffer.pop(0)
-            while int(self.txt_log.index("end-1c").split(".")[0]) > 1000:
-                self.txt_log.delete("1.0", "2.0")
-            if self.var_autoscroll_log.get():
-                self.txt_log.see(tk.END)
+            for line in text.splitlines():
+                if line:
+                    self._append_console_log_line(line, persist=False)
         except OSError:
             pass
 
@@ -1368,13 +1616,48 @@ class WindroseServerManagerApp:
         self._refresh_log_filter()
 
     def _refresh_player_list(self) -> None:
-        online, acct = players.replay_full_log(self.paths.log_path)
-        self.online_players = online
-        self.account_to_player = acct
+        enabled, api_port, admin_pw = config_io.read_rest_api_config(self.paths)
+        if enabled and admin_pw:
+            player_rows, err = rest_api.get_players("127.0.0.1", api_port, admin_pw)
+            if not err:
+                names = {rest_api.player_display_name(p) for p in player_rows}
+                if hasattr(self, "_cmd_userid_choices"):
+                    self._cmd_userid_choices = {
+                        rest_api.player_display_name(p): rest_api.player_user_id(p)
+                        for p in player_rows
+                        if rest_api.player_user_id(p)
+                    }
+                self._apply_online_player_names(names, record_history=True)
+                return
+        if self.paths.log_path.is_file():
+            online, acct = players.replay_full_log(self.paths.log_path)
+            self.account_to_player = acct
+            # Log replay is a snapshot only (no join/leave events).
+            self._apply_online_player_names(online, record_history=False)
+
+    def _apply_online_player_names(self, names: set[str], *, record_history: bool) -> None:
+        """Update Connected Players and optionally emit Connection History from set diffs."""
+        previous = set(self.online_players)
+        incoming = set(names)
+        joined = incoming - previous
+        left = previous - incoming
+        now = datetime.now()
+        stamp = now.strftime("%Y-%m-%d %H:%M")
+        for name in sorted(joined):
+            self._on_player_join(name, now)
+            if record_history:
+                self._add_history(f"[{stamp}] JOINED: {name}")
+        for name in sorted(left):
+            self._on_player_leave(name, now)
+            if record_history:
+                self._add_history(f"[{stamp}] LEFT: {name}")
+        self.online_players = incoming
         self.list_players.delete(0, tk.END)
         for p in sorted(self.online_players):
             self.list_players.insert(tk.END, p)
         self.lbl_players_big.config(text=f"{len(self.online_players)} / {self.max_players}")
+        if hasattr(self, "cmb_cmd_userid"):
+            self._refresh_command_userid_choices()
 
     def _add_history(self, entry: str) -> None:
         self.list_history.insert(tk.END, entry)
@@ -1642,7 +1925,9 @@ class WindroseServerManagerApp:
         self.mgr.backup_interval_value = interval_value
         self.mgr.backup_interval_unit = interval_unit
         self.mgr.schedule_enabled = self.var_schedule.get()
-        self.mgr.schedule_time = self.ent_schedule_time.get().strip()
+        self.mgr.schedule_time = self._get_schedule_time_24h() or "04:00"
+        if hasattr(self, "ent_launch_args"):
+            self.mgr.launch_arguments = self.ent_launch_args.get().strip() or constants.DEFAULT_LAUNCH_ARGS
         self._sync_discord_mgr_from_ui()
         settings.save_manager_settings(self.paths, self.mgr, self.client)
 
@@ -1695,7 +1980,7 @@ class WindroseServerManagerApp:
 
         def worker() -> None:
             ok, err = discord_webhook.send_discord_webhook(
-                url, "Windrose Server Manager: **test** notification (webhook OK)."
+                url, "Palworld Server Manager: **test** notification (webhook OK)."
             )
             if ok:
                 self.root.after(0, lambda: self.log("Discord test message sent."))
@@ -1713,8 +1998,7 @@ class WindroseServerManagerApp:
         self.ent_backup_interval.insert(0, str(self.mgr.backup_interval_value))
         self.cmb_backup_unit.set("Minutes" if self.mgr.backup_interval_unit == "minutes" else "Hours")
         self.var_schedule.set(self.mgr.schedule_enabled)
-        self.ent_schedule_time.delete(0, tk.END)
-        self.ent_schedule_time.insert(0, self.mgr.schedule_time)
+        self._set_schedule_widgets_from_24h(self.mgr.schedule_time)
         self.var_discord_enabled.set(self.mgr.discord_webhook_enabled)
         self.ent_discord_url.delete(0, tk.END)
         self.ent_discord_url.insert(0, self.mgr.discord_webhook_url)
@@ -1726,6 +2010,9 @@ class WindroseServerManagerApp:
         ):
             ent.delete(0, tk.END)
             ent.insert(0, val)
+        if hasattr(self, "ent_launch_args"):
+            self.ent_launch_args.delete(0, tk.END)
+            self.ent_launch_args.insert(0, self.mgr.launch_arguments or constants.DEFAULT_LAUNCH_ARGS)
         if self.mgr.steamcmd_force_install_dir:
             self.client.steamcmd_force_install_dir = self.mgr.steamcmd_force_install_dir
             settings.sync_steamcmd_sidecar(
@@ -1736,7 +2023,7 @@ class WindroseServerManagerApp:
 
     def _post_load_init(self) -> None:
         self.lbl_cur_ver.config(text=f"Current version: {constants.APP_VERSION}")
-        self.lbl_version_corner.config(text=f"Version: {constants.APP_VERSION}")
+        self.lbl_version_corner.config(text=f"Server Manager Version: {constants.APP_VERSION}")
         self.ent_install_dest.delete(0, tk.END)
         self.ent_install_dest.insert(0, str(self.paths.server_dir))
         if self.client.install_client == "SteamCMD" and self.client.steamcmd_force_install_dir:
@@ -1747,12 +2034,11 @@ class WindroseServerManagerApp:
             stamp = z.stem.replace("Backup_", "")
             self.lbl_last_backup.config(text=f"Last backup: {stamp}")
         self._read_server_config_ui()
-        self._read_world_config_ui()
         self._load_history()
         self._load_insights_data()
         self._update_setup_wizard()
         if self.client.install_client != "SteamCMD":
-            det = self._find_steam_windrose()
+            det = self._find_steam_palworld()
             if not det and self._initial_detect:
                 det = self._initial_detect
             if det:
@@ -1784,10 +2070,10 @@ class WindroseServerManagerApp:
         raw = self.ent_install_dest.get().strip()
         return Path(raw) if raw else None
 
-    def _find_steam_windrose(self):
+    def _find_steam_palworld(self):
         fd = self.client.steamcmd_force_install_dir
         force = Path(fd) if fd else None
-        return steam.find_steam_windrose(
+        return steam.find_steam_palworld(
             self.client.install_client,
             steam_install_root=Path(self.client.steam_install_root) if self.client.steam_install_root else None,
             steamcmd_install_root=Path(self.client.steamcmd_install_root) if self.client.steamcmd_install_root else None,
@@ -1816,14 +2102,16 @@ class WindroseServerManagerApp:
             self.client = cs
             if self.client.server_root:
                 sr = Path(self.client.server_root)
-                if (sr / "WindroseServer.exe").is_file():
+                if (sr / "PalServer.exe").is_file() or (
+                    sr / "Pal" / "Binaries" / "Win64" / "PalServer-Win64-Shipping-Cmd.exe"
+                ).is_file():
                     self.paths.set_root(sr)
                     self.paths.ensure_backup_dir()
                     return sr
         else:
             r = messagebox.askyesnocancel(
                 "Choose Client Type",
-                "Which client are you using to host your Windrose server?\n\n"
+                "Which client are you using to host your Palworld server?\n\n"
                 "Yes = Steam\nNo = SteamCMD\nCancel = Skip setup",
             )
             if r is True:
@@ -1879,35 +2167,39 @@ class WindroseServerManagerApp:
         if side:
             self.client.steamcmd_force_install_dir = side
 
-        found = self._find_any_windrose()
-        if not found and self.paths.server_exe.is_file():
+        found = self._find_any_palworld()
+        if not found and self.paths.server_installed():
             found = self.paths.server_dir
         if not found:
             if self.client.install_client == "Steam":
                 if messagebox.askyesno(
                     "Server Files Not Found",
-                    "Could not auto-detect Windrose server files. Do you already have server files installed?",
+                    "Could not auto-detect Palworld server files. Do you already have server files installed?",
                 ):
-                    d = filedialog.askdirectory(title="Select WindowsServer folder (contains WindroseServer.exe)")
-                    if d and (Path(d) / "WindroseServer.exe").is_file():
+                    d = filedialog.askdirectory(title="Select Palworld server folder (contains PalServer.exe)")
+                    if d and ((Path(d) / "PalServer.exe").is_file() or (
+                        Path(d) / "Pal" / "Binaries" / "Win64" / "PalServer-Win64-Shipping-Cmd.exe"
+                    ).is_file()):
                         found = Path(d)
             else:
                 # SteamCMD-specific first-run guidance.
                 has_existing = messagebox.askyesno(
                     "SteamCMD Server Files",
-                    "Do you already have the Windrose server files installed?\n\n"
-                    "Yes - Select your existing Windrose Server folder (contains WindroseServer.exe).\n"
-                    "No - Select the folder where you want Windrose Server files installed via SteamCMD.",
+                    "Do you already have the Palworld server files installed?\n\n"
+                    "Yes - Select your existing Palworld Server folder (contains PalServer.exe).\n"
+                    "No - Select the folder where you want Palworld Server files installed via SteamCMD.",
                 )
                 if has_existing:
                     d = filedialog.askdirectory(
-                        title="Select Windrose Server folder (contains WindroseServer.exe)"
+                        title="Select Palworld Server folder (contains PalServer.exe)"
                     )
-                    if d and (Path(d) / "WindroseServer.exe").is_file():
+                    if d and ((Path(d) / "PalServer.exe").is_file() or (
+                        Path(d) / "Pal" / "Binaries" / "Win64" / "PalServer-Win64-Shipping-Cmd.exe"
+                    ).is_file()):
                         found = Path(d)
                 else:
                     d = filedialog.askdirectory(
-                        title="Select destination for Windrose server files (SteamCMD)"
+                        title="Select destination for Palworld server files (SteamCMD)"
                     )
                     if d:
                         self.client.steamcmd_force_install_dir = d
@@ -1937,17 +2229,17 @@ class WindroseServerManagerApp:
         except OSError:
             pass
 
-    def _find_any_windrose(self) -> Path | None:
-        if self.paths.server_exe.is_file():
+    def _find_any_palworld(self) -> Path | None:
+        if self.paths.server_installed():
             return self.paths.server_dir
-        w = self._find_steam_windrose()
+        w = self._find_steam_palworld()
         return w
 
     def _update_setup_wizard(self) -> None:
         if self.client.install_client == "SteamCMD":
             self.lbl_req_help.config(
                 text=(
-                    "Windrose must be installed via SteamCMD (App ID 4129620). "
+                    "Palworld must be installed via SteamCMD (App ID 2394010). "
                     "Be sure to specify your SteamCMD Location and Server Location below. "
                     "Then click on \"Install Server.\" After it completes click on \"Re-check\""
                 )
@@ -1962,15 +2254,15 @@ class WindroseServerManagerApp:
         else:
             self.lbl_req_help.config(
                 text=(
-                    "Windrose must be installed via Steam (App ID 4129620). "
-                    "The dedicated server files are bundled inside the game - no separate download needed."
+                    "Palworld must be installed via Steam (App ID 2394010). "
+                    "Install the Palworld Dedicated Server app from Steam."
                 )
             )
             self.lbl_steam_source.config(text="Steam Source")
         self.lbl_client_mode.config(text=f"Current mode: {self.client.install_client}")
 
-        steam_found = self._find_steam_windrose() is not None or self.paths.server_exe.is_file()
-        server_ready = self.paths.server_exe.is_file()
+        steam_found = self._find_steam_palworld() is not None or self.paths.server_installed()
+        server_ready = self.paths.server_installed()
         def set_step(i: int, badge_bg: str, badge_txt: str, status: str | None, status_fg: str | None):
             badge, st = self._step_headers[i]
             badge.config(bg=badge_bg, text=badge_txt)
@@ -1983,14 +2275,14 @@ class WindroseServerManagerApp:
         if steam_found:
             set_step(0, g, "\u2713", "Ready", fg_ok)
             self.lbl_req_steam.config(
-                text=f"\u2713 Windrose found ({self.client.install_client})", fg=fg_ok
+                text=f"\u2713 Palworld found ({self.client.install_client})", fg=fg_ok
             )
         else:
             set_step(0, b, "1", "Action needed", r_)
             msg = (
-                "\u2717 Windrose not found - install/update with SteamCMD app_update 4129620"
+                "\u2717 Palworld not found - install/update with SteamCMD app_update 2394010"
                 if self.client.install_client == "SteamCMD"
-                else "\u2717 Windrose not found - install it via Steam first (App ID 4129620)"
+                else "\u2717 Palworld not found - install it via Steam first (App ID 2394010)"
             )
             self.lbl_req_steam.config(text=msg, fg=r_)
 
@@ -2013,11 +2305,12 @@ class WindroseServerManagerApp:
             self.btn_install_server.config(text="Install Server")
             self.lbl_install_warn.config(text="")
 
-        if not self.paths.server_exe.is_file():
+        if not self.paths.server_installed():
             self.canvas_install.itemconfig(self._install_dot, fill=self.c["red"])
             self.lbl_install_status.config(text="Not installed - see Install tab", fg=self.c["red"])
-            self.nb.select(self.nb.tabs()[4])
+            self._select_install_tab()
         self._apply_install_update_button_state()
+        self._apply_start_button_state()
 
     def _apply_install_update_button_state(self) -> None:
         if process_ops.get_server_process():
@@ -2033,126 +2326,79 @@ class WindroseServerManagerApp:
         self.tip_install_server.text = ""
 
     def _read_server_config_ui(self) -> None:
-        data = config_io.read_server_config_dict(self.paths)
-        if not data:
+        opts = config_io.read_effective_option_settings(self.paths)
+        if not opts:
             return
-        inner = data.get("ServerDescription_Persistent") or {}
-        if inner.get("ServerName"):
-            self.ent_srv_name.delete(0, tk.END)
-            self.ent_srv_name.insert(0, str(inner["ServerName"]))
-            self.lbl_server_title.config(text=str(inner["ServerName"]))
-        if inner.get("MaxPlayerCount") is not None:
-            try:
-                val = int(inner["MaxPlayerCount"])
-                val = max(1, min(20, val))
-                self.scale_max.set(val)
-                self.lbl_max_val.config(text=str(val))
-                self.max_players = val
-            except (TypeError, ValueError):
-                pass
-        prot = bool(inner.get("IsPasswordProtected"))
-        self.var_pw_en.set(prot)
-        self.ent_invite_code.delete(0, tk.END)
-        self.ent_invite_code.insert(0, str(inner.get("InviteCode", "")))
-        # Entry may be readonly/disabled at startup; temporarily enable to load text.
-        prev_state = str(self.ent_password.cget("state"))
-        self.ent_password.config(state=tk.NORMAL)
-        self.ent_password.delete(0, tk.END)
-        if inner.get("Password"):
-            # Keep password populated across restarts; Entry remains masked.
-            self.ent_password.insert(0, str(inner["Password"]))
-        if prev_state in ("disabled", "readonly"):
-            self.ent_password.config(state=prev_state)
-        if inner.get("P2pProxyAddress"):
-            self.ent_proxy.delete(0, tk.END)
-            self.ent_proxy.insert(0, str(inner["P2pProxyAddress"]))
-        self.ent_direct_port.delete(0, tk.END)
-        self.ent_direct_port.insert(0, str(inner.get("DirectConnectionServerPort", 7777)))
-        self._toggle_pw_entry()
-
-    def _read_world_config_ui(self) -> None:
-        wp = config_io.find_world_config(self.paths)
-        if not wp:
-            self._set_world_settings_enabled(False)
-            return
-        j = config_io.read_world_config_dict(wp)
-        if not j:
-            self._set_world_settings_enabled(False)
-            return
-        self._set_world_settings_enabled(True)
-        wd = j.get("WorldDescription") or {}
-        preset = wd.get("WorldPresetType") or "Custom"
-        if preset in self.cmb_preset["values"]:
-            self.cmb_preset.set(preset)
-        if preset == "Custom":
-            self.frame_custom.grid()
-        ws = wd.get("WorldSettings") or {}
-        floats = config_io.extract_floats_from_world(ws)
-        for k, (sc, lbl) in self._world_sliders.items():
-            if k in floats:
-                sc.set(floats[k])
-                lbl.config(text=f"{floats[k]:.1f}")
-        bools = config_io.extract_bools_from_world(ws)
-        self.var_coop_quests.set(bools.get("coop_quests", False))
-        self.var_easy_explore.set(bools.get("easy_explore", False))
-        cd = config_io.parse_combat_from_world(wd)
-        if cd in self.cmb_combat["values"]:
-            self.cmb_combat.set(cd)
-
-    def _set_world_settings_enabled(self, enabled: bool) -> None:
-        self._last_world_settings_enabled = enabled
-        preset_state = "readonly" if enabled else "disabled"
-        combat_state = "readonly" if enabled else "disabled"
-        self.cmb_preset.config(state=preset_state)
-        self.cmb_combat.config(state=combat_state)
-        for slider, _lbl in self._world_sliders.values():
-            slider.config(state=tk.NORMAL if enabled else tk.DISABLED)
-        self.chk_coop_quests.state(["!disabled"] if enabled else ["disabled"])
-        self.chk_easy_explore.state(["!disabled"] if enabled else ["disabled"])
-        self.lbl_world_missing.grid() if not enabled else self.lbl_world_missing.grid_remove()
+        self.config_form.populate(opts, self.mgr.launch_arguments or constants.DEFAULT_LAUNCH_ARGS)
+        server_name = opts.get("ServerName")
+        if server_name:
+            self.lbl_server_title.config(text=str(server_name))
 
     def _start_server_process(self) -> None:
-        exe = (
-            self.paths.server_exe_direct
-            if self.paths.server_exe_direct.is_file()
-            else self.paths.server_exe
-        )
-        creation = getattr(subprocess, "CREATE_NO_WINDOW", 0)
-        # Use the shipping exe folder as the working directory when possible.
-        # If cwd is the manager install tree (or any folder that contains unrelated MSVC
-        # runtimes), Windows DLL search can pick up *_internal\\VCRUNTIME140.dll from the
-        # Server Manager and lock it — which breaks in-place self-updates while the server runs.
-        cwd = str(exe.parent if exe.is_file() else self.paths.server_dir)
+        # Match the manual .bat: start PalServer.exe <args> from the server folder.
+        # Visible console only (Log-tab capture is WIP / disabled).
+        if self.paths.server_exe.is_file():
+            exe = self.paths.server_exe
+            cwd = str(self.paths.server_dir)
+        else:
+            exe = self.paths.server_exe_direct
+            cwd = str(exe.parent if exe.is_file() else self.paths.server_dir)
+        launch_args = shlex.split(self.ent_launch_args.get().strip() or constants.DEFAULT_LAUNCH_ARGS)
+        self.mgr.launch_arguments = self.ent_launch_args.get().strip() or constants.DEFAULT_LAUNCH_ARGS
+        settings.save_manager_settings(self.paths, self.mgr, self.client)
+        child_env = _isolated_dedicated_server_env(cwd)
         switched, meipass = _reset_windows_dll_directory_for_child_launch()
         try:
+            creationflags = subprocess.CREATE_NEW_CONSOLE if os.name == "nt" else 0
             self.server_popen = subprocess.Popen(
-                [str(exe)],
+                [str(exe), *launch_args],
                 cwd=cwd,
-                env=_isolated_dedicated_server_env(cwd),
-                creationflags=creation,
+                env=child_env,
+                creationflags=creationflags,
             )
         finally:
             if switched:
                 _restore_windows_dll_directory_after_child_launch(meipass)
 
-    def _poll_invite_code(self) -> None:
-        self._poll_invite_count += 1
-        code = config_io.read_invite_code(self.paths)
-        if code:
-            self.lbl_invite.config(text=code)
-            return
-        if self._poll_invite_count < 24:
-            self.root.after(5000, self._poll_invite_code)
+    def _poll_rest_api(self) -> None:
+        self._rest_api_poll_count += 1
+        enabled, api_port, admin_pw = config_io.read_rest_api_config(self.paths)
+        if enabled and admin_pw:
+            info, _err = rest_api.get_server_info("127.0.0.1", api_port, admin_pw)
+            if info:
+                version = info.get("version") or info.get("serverversion") or info.get("ServerVersion")
+                if version:
+                    self.lbl_server_info.config(text=str(version))
+                    self._server_version_label = str(version)
+                self._refresh_player_list()
+                return
+        if self._rest_api_poll_count < 24:
+            self.root.after(5000, self._poll_rest_api)
 
     def _on_start(self) -> None:
         self._stop_pending = False
         self._stop_pending_logged = False
-        if not self.paths.server_exe.is_file():
+        if not self.paths.server_installed():
             self.log("Server not installed.")
+            return
+        if not config_io.is_server_config_ready(self.paths):
+            self.log(_CONFIG_REQUIRED_MSG)
+            messagebox.showwarning("Server Config Required", _CONFIG_REQUIRED_MSG)
+            self._select_config_tab()
             return
         try:
             self.log_position = 0
             self.log_buffer.clear()
+            self.txt_log.delete("1.0", tk.END)
+            while True:
+                try:
+                    self._console_log_queue.get_nowait()
+                except Empty:
+                    break
+            try:
+                self.paths.log_path.write_text("", encoding="utf-8")
+            except OSError:
+                pass
             self.online_players.clear()
             self.account_to_player.clear()
             self._start_server_process()
@@ -2166,30 +2412,88 @@ class WindroseServerManagerApp:
                     self.prev_cpu_time = None
             self.prev_cpu_check = datetime.now()
             self._set_ui_running()
-            self.log("Server started.")
-            self._poll_invite_count = 0
-            self._poll_invite_code()
+            self.log("Server started. Console output appears in the PalServer window.")
         except OSError as e:
             self.log(f"Failed to start: {e}")
 
     def _on_stop(self) -> None:
+        if self._stop_pending:
+            return
         self._stop_pending = True
         self._stop_pending_logged = False
         self._restart_pending = False
+        self.btn_stop.config(state=tk.DISABLED)
+        self.btn_restart.config(state=tk.DISABLED)
         self._discord_maybe_send(
             self.ent_discord_msg_stop.get().strip() or settings.DEFAULT_DISCORD_MSG_STOP
         )
+        enabled, api_port, admin_pw = config_io.read_rest_api_config(self.paths)
+        if not enabled or not admin_pw:
+            self.log("REST API not available; force-stopping the server.")
+            self._force_stop_processes()
+            return
+        waittime = 1
+        message = "Server shutting down."
+        self.log(f"Requesting graceful shutdown via REST API ({waittime}s)...")
+        threading.Thread(
+            target=self._shutdown_via_api_worker,
+            args=(api_port, admin_pw, waittime, message),
+            daemon=True,
+        ).start()
+
+    def _force_stop_processes(self) -> None:
         process_ops.stop_all_server_processes()
         self.server_popen = None
         self.start_time = None
+        self._stop_pending = False
+        self._stop_pending_logged = False
         self._set_ui_stopped()
-        self._read_world_config_ui()
         self.log("Server stopped.")
 
+    def _shutdown_via_api_worker(
+        self,
+        api_port: int,
+        admin_pw: str,
+        waittime: int,
+        message: str,
+    ) -> None:
+        _, err = rest_api.shutdown_server(
+            "127.0.0.1",
+            api_port,
+            admin_pw,
+            waittime=waittime,
+            message=message,
+        )
+        if err:
+            self.root.after(0, lambda e=err: self._on_shutdown_api_failed(e))
+            return
+        # Wait for the server process to exit after the countdown.
+        deadline = time.monotonic() + max(waittime, 0) + 30
+        while time.monotonic() < deadline:
+            if not process_ops.get_server_process():
+                # Watchdog marks the UI stopped when _stop_pending clears the process.
+                return
+            time.sleep(0.5)
+        self.root.after(0, self._on_shutdown_timeout)
+
+    def _on_shutdown_api_failed(self, err: str) -> None:
+        self.log(f"Shutdown API failed ({err}); force-stopping.")
+        self._force_stop_processes()
+
+    def _on_shutdown_timeout(self) -> None:
+        if not self._stop_pending or not process_ops.get_server_process():
+            return
+        self.log("Graceful shutdown timed out; force-stopping.")
+        self._force_stop_processes()
+
     def _do_restart(self, reason: str = "manual") -> None:
+        if self._restart_pending:
+            return
         self._restart_pending = True
         self._stop_pending = False
         self._stop_pending_logged = False
+        self.btn_stop.config(state=tk.DISABLED)
+        self.btn_restart.config(state=tk.DISABLED)
         if reason == "manual":
             self._discord_maybe_send(
                 self.ent_discord_msg_restart.get().strip() or settings.DEFAULT_DISCORD_MSG_RESTART
@@ -2198,8 +2502,188 @@ class WindroseServerManagerApp:
             self._discord_maybe_send(
                 self.ent_discord_msg_schedule.get().strip() or settings.DEFAULT_DISCORD_MSG_SCHEDULE
             )
+
+        # Crash recovery: process may already be dead; force-kill leftovers and restart.
+        if reason == "crash":
+            process_ops.stop_all_server_processes()
+            self.root.after(1500, self._restart_after_kill)
+            return
+
+        enabled, api_port, admin_pw = config_io.read_rest_api_config(self.paths)
+        if not enabled or not admin_pw or not process_ops.get_server_process():
+            self.log("REST API unavailable; force-restarting.")
+            process_ops.stop_all_server_processes()
+            self.root.after(1500, self._restart_after_kill)
+            return
+
+        waittime = 1
+        message = (
+            "Scheduled server restart beginning."
+            if reason == "schedule"
+            else "Server restarting."
+        )
+        self.log(f"Restart: requesting graceful shutdown via REST API ({waittime}s)...")
+        threading.Thread(
+            target=self._restart_via_api_worker,
+            args=(api_port, admin_pw, waittime, message),
+            daemon=True,
+        ).start()
+
+    def _restart_via_api_worker(
+        self,
+        api_port: int,
+        admin_pw: str,
+        waittime: int,
+        message: str,
+    ) -> None:
+        _, err = rest_api.shutdown_server(
+            "127.0.0.1",
+            api_port,
+            admin_pw,
+            waittime=waittime,
+            message=message,
+        )
+        if err:
+            self.root.after(0, lambda e=err: self._on_restart_shutdown_failed(e))
+            return
+        deadline = time.monotonic() + max(waittime, 0) + 30
+        while time.monotonic() < deadline:
+            if not process_ops.get_server_process():
+                self.root.after(1500, self._restart_after_kill)
+                return
+            time.sleep(0.5)
+        self.root.after(0, self._on_restart_shutdown_timeout)
+
+    def _on_restart_shutdown_failed(self, err: str) -> None:
+        self.log(f"Restart shutdown API failed ({err}); force-restarting.")
         process_ops.stop_all_server_processes()
         self.root.after(1500, self._restart_after_kill)
+
+    def _on_restart_shutdown_timeout(self) -> None:
+        if not self._restart_pending:
+            return
+        if not process_ops.get_server_process():
+            self.root.after(1500, self._restart_after_kill)
+            return
+        self.log("Graceful restart shutdown timed out; force-restarting.")
+        process_ops.stop_all_server_processes()
+        self.root.after(1500, self._restart_after_kill)
+
+    def _parse_schedule_hhmm(self, value: str) -> tuple[int, int] | None:
+        """Parse HH:MM (24h) or h:mm AM/PM into (hour24, minute)."""
+        text = (value or "").strip()
+        if not text:
+            return None
+        m = re.match(r"^(\d{1,2}):(\d{2})\s*(AM|PM)?$", text, re.I)
+        if not m:
+            return None
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+        if minute < 0 or minute > 59:
+            return None
+        ampm = (m.group(3) or "").upper()
+        if ampm:
+            if hour < 1 or hour > 12:
+                return None
+            if ampm == "AM":
+                hour = 0 if hour == 12 else hour
+            else:
+                hour = 12 if hour == 12 else hour + 12
+        elif hour > 23:
+            return None
+        return hour, minute
+
+    def _get_schedule_time_24h(self) -> str:
+        try:
+            hour12 = int(self.cmb_schedule_hour.get())
+            minute = int(self.cmb_schedule_minute.get())
+        except (TypeError, ValueError):
+            return ""
+        ampm = (self.cmb_schedule_ampm.get() or "AM").strip().upper()
+        if hour12 < 1 or hour12 > 12 or minute < 0 or minute > 59:
+            return ""
+        if ampm == "AM":
+            hour24 = 0 if hour12 == 12 else hour12
+        else:
+            hour24 = 12 if hour12 == 12 else hour12 + 12
+        return f"{hour24:02d}:{minute:02d}"
+
+    def _set_schedule_widgets_from_24h(self, value: str) -> None:
+        parsed = self._parse_schedule_hhmm(value) or (4, 0)
+        hour24, minute = parsed
+        ampm = "AM" if hour24 < 12 else "PM"
+        hour12 = hour24 % 12
+        if hour12 == 0:
+            hour12 = 12
+        self.cmb_schedule_hour.set(str(hour12))
+        self.cmb_schedule_minute.set(f"{minute:02d}")
+        self.cmb_schedule_ampm.set(ampm)
+
+    def _seconds_until_todays_schedule(self) -> float | None:
+        target = self._get_schedule_time_24h()
+        if not target:
+            return None
+        try:
+            parts = target.split(":")
+            hh, mm = int(parts[0]), int(parts[1])
+        except (ValueError, IndexError):
+            return None
+        now = datetime.now()
+        try:
+            sched = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+        except ValueError:
+            return None
+        if sched <= now:
+            return None
+        return (sched - now).total_seconds()
+
+    def _tick_scheduled_restart_warnings(self, proc) -> None:
+        """Announce at 30/20/15/10/5/1 minutes before the daily restart."""
+        if not proc or self._restart_pending or self._stop_pending:
+            self._schedule_prev_secs = None
+            return
+        secs = self._seconds_until_todays_schedule()
+        if secs is None:
+            self._schedule_prev_secs = None
+            return
+        today = date.today()
+        if self.last_schedule_date == today:
+            # Already restarted (or triggered) for today; no more warnings.
+            self._schedule_prev_secs = secs
+            return
+        # Reset warning bookkeeping at day boundaries.
+        warn_day = getattr(self, "_schedule_warn_day", None)
+        if warn_day != today:
+            self._schedule_warn_day = today
+            self._schedule_warn_sent.clear()
+        prev = self._schedule_prev_secs
+        self._schedule_prev_secs = secs
+        if prev is None:
+            return
+        for minutes in (30, 20, 15, 10, 5, 1):
+            if minutes in self._schedule_warn_sent:
+                continue
+            threshold = minutes * 60
+            # Fire once when remaining time crosses this threshold.
+            if prev > threshold >= secs:
+                self._schedule_warn_sent.add(minutes)
+                self._send_schedule_restart_announce(minutes)
+
+    def _send_schedule_restart_announce(self, minutes: int) -> None:
+        unit = "minute" if minutes == 1 else "minutes"
+        message = f"Server restarting in {minutes} {unit}."
+        self.log(f"Scheduled restart announce: {message}")
+        enabled, api_port, admin_pw = config_io.read_rest_api_config(self.paths)
+        if not enabled or not admin_pw:
+            self.log("Could not announce restart warning (REST API unavailable).")
+            return
+
+        def worker() -> None:
+            _, err = rest_api.announce_message("127.0.0.1", api_port, admin_pw, message)
+            if err:
+                self.root.after(0, lambda e=err: self.log(f"Restart announce failed: {e}"))
+
+        threading.Thread(target=worker, daemon=True).start()
 
     def _restart_after_kill(self) -> None:
         try:
@@ -2217,117 +2701,65 @@ class WindroseServerManagerApp:
     def _on_open_folder(self) -> None:
         subprocess.Popen(["explorer", str(self.paths.server_dir)])
 
-    def _copy_invite(self) -> None:
-        code = self.lbl_invite.cget("text")
-        if code not in ("--", "(pending...)"):
+    def _copy_server_info(self) -> None:
+        info = self.lbl_server_info.cget("text")
+        if info not in ("--", "(pending...)"):
             self.root.clipboard_clear()
-            self.root.clipboard_append(code)
-            self.log("Invite code copied to clipboard.")
+            self.root.clipboard_append(info)
+            self.log("Server version copied to clipboard.")
 
     def _on_share(self) -> None:
-        code = self.lbl_invite.cget("text")
         name = self.lbl_server_title.cget("text")
-        if code not in ("--", "(pending...)"):
-            msg = f"Join my Windrose server '{name}'! Invite code: {code}"
-            self.root.clipboard_clear()
-            self.root.clipboard_append(msg)
-            self.log("Share message copied to clipboard.")
-        else:
-            self.log("No invite code available yet.")
+        if hasattr(self, "ent_srv_name"):
+            ui_name = self.ent_srv_name.get().strip()
+            if ui_name:
+                name = ui_name
+        password = ""
+        if hasattr(self, "ent_password"):
+            password = self.ent_password.get()
+        if not password:
+            opts = config_io.read_effective_option_settings(self.paths)
+            password = str(opts.get("ServerPassword") or "")
+        msg = f'Join my Palworld server "{name}" Password: "{password}"'
+        self.root.clipboard_clear()
+        self.root.clipboard_append(msg)
+        self.log("Invite message copied to clipboard.")
 
     def _on_save_config(self) -> None:
         if process_ops.get_server_process():
             self.lbl_cfg_status.config(text="Stop the server before saving config.", fg="tomato")
             return
         try:
-            existing = config_io.read_server_config_dict(self.paths) or {}
-            inner_old = existing.get("ServerDescription_Persistent") or {}
-            inner: dict = {}
-            for field in (
-                "PersistentServerId",
-                "WorldIslandId",
-                "UserSelectedRegion",
-                "UseDirectConnection",
-                "DirectConnectionServerAddress",
-                "DirectConnectionProxyAddress",
-            ):
-                if field in inner_old:
-                    inner[field] = inner_old[field]
-            try:
-                direct_port = int((self.ent_direct_port.get() or "7777").strip())
-            except ValueError:
-                direct_port = 7777
-            pw_text = self.ent_password.get()
-            # If a password is specified, force protection on to avoid mismatched config state.
-            pw_enabled = bool(pw_text.strip())
-            inner["IsPasswordProtected"] = pw_enabled
-            inner["Password"] = pw_text
-            inner["ServerName"] = self.ent_srv_name.get()
-            inner["InviteCode"] = self.ent_invite_code.get().strip()
-            inner["MaxPlayerCount"] = int(round(self.scale_max.get()))
-            inner["P2pProxyAddress"] = self.ent_proxy.get()
-            inner["DirectConnectionServerPort"] = max(1, min(65535, direct_port))
-            root = {
-                "Version": existing.get("Version", 1),
-                "DeploymentId": existing.get("DeploymentId", ""),
-                "ServerDescription_Persistent": inner,
-            }
-            self.paths.config_path.parent.mkdir(parents=True, exist_ok=True)
-            self.paths.config_path.write_text(json.dumps(root, indent=2), encoding="utf-8")
-            self.lbl_server_title.config(text=self.ent_srv_name.get())
-            self.var_pw_en.set(pw_enabled)
-            self._toggle_pw_entry()
-            wpath = config_io.find_world_config(self.paths)
-            if wpath:
-                existing_world = config_io.read_world_config_dict(wpath)
-                floats = {k: float(sl.get()) for k, (sl, _) in self._world_sliders.items()}
-                bools = {"coop_quests": self.var_coop_quests.get(), "easy_explore": self.var_easy_explore.get()}
-                payload = config_io.build_world_save_payload(
-                    paths=self.paths,
-                    preset=self.cmb_preset.get(),
-                    combat_short=self.cmb_combat.get(),
-                    floats=floats,
-                    bools=bools,
-                    existing_world=existing_world,
-                )
-                wpath.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-            else:
-                self.lbl_cfg_status.config(
-                    text=(
-                        "Server Settings saved.\nWorld settings were not saved because WorldDescription.json "
-                        "does not exist yet."
-                    ),
-                    fg=self.c["accent"],
-                )
-                return
+            updates = self.config_form.collect()
+            config_io.merge_option_settings(self.paths, updates)
+            self.mgr.launch_arguments = self.config_form.get_launch_arguments()
+            settings.save_manager_settings(self.paths, self.mgr, self.client)
+            self.lbl_server_title.config(text=str(updates.get("ServerName", "Default Palworld Server")))
             ts = datetime.now().strftime("%H:%M:%S")
             self.lbl_cfg_status.config(text=f"Config saved at {ts}.", fg=self.c["green"])
+            self._apply_start_button_state()
+            self.log(f"Config saved at {ts}.")
         except OSError as e:
             self.lbl_cfg_status.config(text=f"Error: {e}", fg="tomato")
 
     def _on_reload_config(self) -> None:
         self._read_server_config_ui()
-        self._read_world_config_ui()
         self.lbl_cfg_status.config(text="Config reloaded from disk.", fg=self.c["text_dim"])
 
-    def _on_open_world_json(self) -> None:
-        wp = config_io.find_world_config(self.paths)
-        if wp and wp.is_file():
-            subprocess.Popen(["notepad", str(wp)])
-        else:
-            self.log("WorldDescription.json not found.")
-
     def _on_open_server_config(self) -> None:
-        if self.paths.config_path.is_file():
+        if self.paths.config_path.is_file() and self.paths.config_path.stat().st_size > 0:
             subprocess.Popen(["notepad", str(self.paths.config_path)])
         else:
-            self.log("ServerDescription.json not found.")
+            self.log(
+                "PalWorldSettings.ini not found. Open the Config tab and click Save Config to generate it."
+            )
+            self._select_config_tab()
 
     def _on_export_logs(self) -> None:
         p = filedialog.asksaveasfilename(
             defaultextension=".log",
             filetypes=[("Log", "*.log"), ("Text", "*.txt"), ("All", "*.*")],
-            initialfile=f"Windrose-Log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log",
+            initialfile=f"Palworld-Log_{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}.log",
         )
         if not p:
             return
@@ -2486,7 +2918,7 @@ class WindroseServerManagerApp:
             messagebox.showinfo(
                 "Update",
                 f"Version {remote} will be installed when this application closes.\n\n"
-                "The Windrose Server Manager will restart automatically.",
+                "The Palworld Server Manager will restart automatically.",
             )
             ok, err = updater.spawn_deferred_update(payload, work)
             if not ok:
@@ -2563,7 +2995,7 @@ class WindroseServerManagerApp:
                 self.client.steamcmd_force_install_dir = td
                 settings.save_client_settings(self.paths, self.client)
                 self._save_bootstrap_client_settings()
-        found = self._find_steam_windrose()
+        found = self._find_steam_palworld()
         if found:
             if self.client.install_client == "SteamCMD":
                 cmd = self.client.steamcmd_install_root or str(
@@ -2580,9 +3012,9 @@ class WindroseServerManagerApp:
             self.txt_install_log.delete("1.0", tk.END)
             self.txt_install_log.insert(
                 tk.END,
-                "Could not auto-detect Windrose in SteamCMD libraries."
+                "Could not auto-detect Palworld in SteamCMD libraries."
                 if self.client.install_client == "SteamCMD"
-                else "Could not auto-detect Windrose in Steam libraries.",
+                else "Could not auto-detect Palworld in Steam libraries.",
             )
 
     def _on_browse_source(self) -> None:
@@ -2597,7 +3029,7 @@ class WindroseServerManagerApp:
             elif d:
                 messagebox.showwarning("Invalid", "steamcmd.exe was not found in that folder.")
         else:
-            d = filedialog.askdirectory(title="Select WindowsServer folder (WindroseServer.exe)")
+            d = filedialog.askdirectory(title="Select Palworld server folder (PalServer.exe)")
             if d:
                 self.ent_steam_src.delete(0, tk.END)
                 self.ent_steam_src.insert(0, d)
@@ -2637,34 +3069,29 @@ class WindroseServerManagerApp:
             self._save_bootstrap_client_settings()
             Path(dst).mkdir(parents=True, exist_ok=True)
             steamcmd_exe = Path(cmd_root) / "steamcmd.exe"
-            args = [
-                str(steamcmd_exe),
-                "+@ShutdownOnFailedCommand",
-                "1",
-                "+@NoPromptForPassword",
-                "1",
-                "+force_install_dir",
-                dst,
-                "+login",
-                "anonymous",
-                "+app_update",
-                constants.WINDROSE_STEAM_APP_ID,
-                "validate",
-                "+quit",
-            ]
+            steamcmd_path = str(steamcmd_exe)
+            server_location = str(Path(dst).resolve())
+            start_cmd = (
+                f'start "" "{steamcmd_path}" +force_install_dir "{server_location}" '
+                f"+login anonymous +app_update {constants.PALWORLD_STEAM_APP_ID} validate +quit"
+            )
+            display_cmd = (
+                f'start {steamcmd_path} +force_install_dir "{server_location}" '
+                f"+login anonymous +app_update {constants.PALWORLD_STEAM_APP_ID} validate +quit"
+            )
             self.txt_install_log.delete("1.0", tk.END)
             self.txt_install_log.insert(
                 tk.END,
-                f"Starting SteamCMD...\n{steamcmd_exe}\n" + " ".join(args) + "\n\nA separate SteamCMD window will open.",
+                f"Starting SteamCMD...\n{display_cmd}\n\nA separate SteamCMD window will open.",
             )
-            creationflags = 0
-            for flag_name in ("CREATE_NEW_CONSOLE", "CREATE_NEW_PROCESS_GROUP"):
-                creationflags |= getattr(subprocess, flag_name, 0)
-            subprocess.Popen(args, cwd=cmd_root, creationflags=creationflags, close_fds=True)
+            subprocess.Popen(start_cmd, shell=True, cwd=cmd_root)
             return
 
         src = self.ent_steam_src.get().strip()
-        if not src or not (Path(src) / "WindroseServer.exe").is_file():
+        if not src or not (
+            (Path(src) / "PalServer.exe").is_file()
+            or (Path(src) / "Pal" / "Binaries" / "Win64" / "PalServer-Win64-Shipping-Cmd.exe").is_file()
+        ):
             self.txt_install_log.delete("1.0", tk.END)
             self.txt_install_log.insert(tk.END, f"ERROR: Invalid source:\n{src}")
             return
@@ -2697,8 +3124,11 @@ class WindroseServerManagerApp:
 
     def _install_finished(self, dst: str) -> None:
         self.btn_install_server.config(state=tk.NORMAL)
-        dst_exe = Path(dst) / "WindroseServer.exe"
-        if dst_exe.is_file():
+        dst_exe = Path(dst) / "PalServer.exe"
+        dst_cmd = (
+            Path(dst) / "Pal" / "Binaries" / "Win64" / "PalServer-Win64-Shipping-Cmd.exe"
+        )
+        if dst_exe.is_file() or dst_cmd.is_file():
             self.paths.set_root(dst)
             self.paths.ensure_backup_dir()
             self.client.server_root = str(self.paths.server_dir)
@@ -2707,12 +3137,10 @@ class WindroseServerManagerApp:
             self.canvas_install.itemconfig(self._install_dot, fill="#00FF00")
             self.lbl_install_status.config(text="Server installed successfully.", fg=self.c["green"])
             self.txt_install_log.insert(tk.END, "\n\nInstall complete!")
-            if not self.paths.config_path.is_file():
-                config_io.write_minimal_server_config(self.paths)
-                self._read_server_config_ui()
+            self._read_server_config_ui()
             self._update_setup_wizard()
         else:
-            self.txt_install_log.insert(tk.END, "\n\nWARNING: WindroseServer.exe not found at destination.")
+            self.txt_install_log.insert(tk.END, "\n\nWARNING: PalServer.exe not found at destination.")
 
     def _on_check_reqs(self) -> None:
         if self.client.install_client == "SteamCMD":
@@ -2721,7 +3149,7 @@ class WindroseServerManagerApp:
                 self.client.steamcmd_force_install_dir = td
                 settings.save_client_settings(self.paths, self.client)
                 self._save_bootstrap_client_settings()
-        found = self._find_steam_windrose()
+        found = self._find_steam_palworld()
         if found:
             self.paths.set_root(found)
             self.paths.ensure_backup_dir()
@@ -2737,7 +3165,7 @@ class WindroseServerManagerApp:
             else:
                 self.ent_steam_src.delete(0, tk.END)
                 self.ent_steam_src.insert(0, str(found))
-        elif self.paths.server_exe.is_file():
+        elif self.paths.server_installed():
             if self.client.install_client == "SteamCMD":
                 cmd = self.client.steamcmd_install_root or str(
                     steam.get_steamcmd_install_root(_app_package_dir().parent) or ""

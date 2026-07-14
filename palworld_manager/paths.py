@@ -18,31 +18,50 @@ class ServerPaths:
 
     @property
     def client_settings_file(self) -> Path:
-        return self.server_dir / "windrose_client_settings.json"
+        return self.server_dir / "palworld_client_settings.json"
 
     @property
     def steamcmd_sidecar(self) -> Path:
-        return self.server_dir / "WindroseManagerSteamCMDRoot.txt"
+        return self.server_dir / "PalworldManagerSteamCMDRoot.txt"
 
     @property
     def server_exe(self) -> Path:
-        return self.server_dir / "WindroseServer.exe"
+        return self.server_dir / "PalServer.exe"
 
     @property
     def server_exe_direct(self) -> Path:
-        return self.server_dir / "R5" / "Binaries" / "Win64" / "WindroseServer-Win64-Shipping.exe"
+        return (
+            self.server_dir
+            / "Pal"
+            / "Binaries"
+            / "Win64"
+            / "PalServer-Win64-Shipping-Cmd.exe"
+        )
 
     @property
     def config_path(self) -> Path:
-        return self.server_dir / "R5" / "ServerDescription.json"
+        return (
+            self.server_dir
+            / "Pal"
+            / "Saved"
+            / "Config"
+            / "WindowsServer"
+            / "PalWorldSettings.ini"
+        )
+
+    @property
+    def default_config_template(self) -> Path:
+        return self.server_dir / "DefaultPalWorldSettings.ini"
 
     @property
     def log_path(self) -> Path:
-        return self.server_dir / "R5" / "Saved" / "Logs" / "R5.log"
+        # Palworld does not write console output to disk; the manager mirrors
+        # captured stdout here so the Log tab / export have a stable file.
+        return self.server_dir / "manager_console.log"
 
     @property
     def saves_base(self) -> Path:
-        return self.server_dir / "R5" / "Saved" / "SaveProfiles"
+        return self.server_dir / "Pal" / "Saved" / "SaveGames"
 
     @property
     def backup_dir(self) -> Path:
@@ -66,3 +85,6 @@ class ServerPaths:
 
     def ensure_backup_dir(self) -> None:
         self.backup_dir.mkdir(parents=True, exist_ok=True)
+
+    def server_installed(self) -> bool:
+        return self.server_exe.is_file() or self.server_exe_direct.is_file()

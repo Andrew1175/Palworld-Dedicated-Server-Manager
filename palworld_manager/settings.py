@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from . import constants
+
 
 @dataclass
 class ClientInstallSettings:
@@ -39,30 +41,31 @@ def import_steamcmd_force_from_sidecar(sidecar: Path) -> str | None:
         return None
     try:
         line = sidecar.read_text(encoding="utf-8").strip()
-        return line.rstrip("\\/") if line else None
+        if line:
+            return line.rstrip("\\/")
     except OSError:
-        return None
+        pass
+    return None
 
 
 def read_client_settings(paths) -> ClientInstallSettings | None:
-    if paths.client_settings_file.is_file():
+    settings_path = paths.client_settings_file
+    if settings_path.is_file():
         try:
-            data = json.loads(paths.client_settings_file.read_text(encoding="utf-8"))
-            if not data.get("InstallClientChoiceSaved"):
-                return None
-            ic = data.get("InstallClient")
-            if ic not in ("Steam", "SteamCMD"):
-                return None
-            return ClientInstallSettings(
-                install_client_choice_saved=True,
-                install_client=ic,
-                steam_install_root=_norm(data.get("SteamInstallRoot")),
-                steamcmd_install_root=_norm(data.get("SteamCmdInstallRoot")),
-                steamcmd_force_install_dir=_norm(data.get("SteamCmdForceInstallDir")),
-                server_root=_norm(data.get("ServerRoot")),
-            )
+            data = json.loads(settings_path.read_text(encoding="utf-8"))
+            if data.get("InstallClientChoiceSaved"):
+                ic = data.get("InstallClient")
+                if ic in ("Steam", "SteamCMD"):
+                    return ClientInstallSettings(
+                        install_client_choice_saved=True,
+                        install_client=ic,
+                        steam_install_root=_norm(data.get("SteamInstallRoot")),
+                        steamcmd_install_root=_norm(data.get("SteamCmdInstallRoot")),
+                        steamcmd_force_install_dir=_norm(data.get("SteamCmdForceInstallDir")),
+                        server_root=_norm(data.get("ServerRoot")),
+                    )
         except (OSError, json.JSONDecodeError, TypeError):
-            return None
+            pass
 
     if paths.settings_file.is_file():
         try:
@@ -107,11 +110,11 @@ def save_client_settings(paths, s: ClientInstallSettings) -> None:
         pass
 
 
-DEFAULT_DISCORD_MSG_STOP = "Windrose dedicated server **stopped**."
-DEFAULT_DISCORD_MSG_RESTART = "Windrose dedicated server is **restarting** (manual)."
-DEFAULT_DISCORD_MSG_SCHEDULE = "Windrose dedicated server **scheduled restart** started."
+DEFAULT_DISCORD_MSG_STOP = "Palworld dedicated server **stopped**."
+DEFAULT_DISCORD_MSG_RESTART = "Palworld dedicated server is **restarting** (manual)."
+DEFAULT_DISCORD_MSG_SCHEDULE = "Palworld dedicated server **scheduled restart** started."
 DEFAULT_DISCORD_MSG_CRASH = (
-    "Windrose dedicated server process **ended unexpectedly** (possible crash)."
+    "Palworld dedicated server process **ended unexpectedly** (possible crash)."
 )
 
 
@@ -131,6 +134,7 @@ class ManagerSettings:
     discord_msg_restart: str = DEFAULT_DISCORD_MSG_RESTART
     discord_msg_schedule: str = DEFAULT_DISCORD_MSG_SCHEDULE
     discord_msg_crash: str = DEFAULT_DISCORD_MSG_CRASH
+    launch_arguments: str = constants.DEFAULT_LAUNCH_ARGS
 
 
 def load_manager_settings(paths) -> ManagerSettings:
@@ -172,6 +176,8 @@ def load_manager_settings(paths) -> ManagerSettings:
             m.discord_msg_schedule = str(s.get("DiscordMsgSchedule") or "").strip() or DEFAULT_DISCORD_MSG_SCHEDULE
         if "DiscordMsgCrash" in s:
             m.discord_msg_crash = str(s.get("DiscordMsgCrash") or "").strip() or DEFAULT_DISCORD_MSG_CRASH
+        if "LaunchArguments" in s:
+            m.launch_arguments = str(s.get("LaunchArguments") or "").strip() or constants.DEFAULT_LAUNCH_ARGS
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
     return m
@@ -202,6 +208,7 @@ def save_manager_settings(
         "DiscordMsgRestart": m.discord_msg_restart,
         "DiscordMsgSchedule": m.discord_msg_schedule,
         "DiscordMsgCrash": m.discord_msg_crash,
+        "LaunchArguments": m.launch_arguments,
     }
     try:
         paths.settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")

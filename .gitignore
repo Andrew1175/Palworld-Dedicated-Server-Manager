@@ -1,8 +1,22 @@
-# Local build files
-Create EXE.bat
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.venv/
+venv/
+
+# Local runtime / machine settings (not source)
+palworld_client_settings.json
+
+# PyInstaller build outputs
 build/
 dist/
-windrose_manager/__pycache__
-Windrose-Server-Manager.spec
-Windrose-Server-Manager-Debug.spec
-windrose_client_settings.json
+*.spec
+
+# Editor / OS junk
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini

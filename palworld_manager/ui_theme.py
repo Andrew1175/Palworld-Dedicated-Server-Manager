@@ -26,8 +26,11 @@ def apply_dark_theme(root: tk.Tk) -> ttk.Style:
     style.configure("TNotebook.Tab", background=c["tab_bg"], foreground=c["text_dim"], padding=(12, 6))
     style.map(
         "TNotebook.Tab",
-        background=[("selected", c["tab_selected"])],
-        foreground=[("selected", c["accent"])],
+        background=[("selected", c["tab_selected"]), ("disabled", c["tab_bg"])],
+        foreground=[
+            ("selected", c["accent"]),
+            ("disabled", c["text_muted"]),
+        ],
     )
     style.configure(
         "TEntry",
@@ -85,3 +88,42 @@ def tk_button(parent, text, command=None, bg="#2A3E55", fg="white", small=False)
         padx=padx,
         pady=pady,
     )
+
+
+class HoverToolTip:
+    def __init__(self, widget: tk.Widget, text: str):
+        self.widget = widget
+        self.text = text
+        self.tip: tk.Toplevel | None = None
+        widget.bind("<Enter>", self._show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+
+    def _show(self, _event=None) -> None:
+        if not self.text.strip():
+            return
+        if self.tip:
+            return
+        self.tip = tk.Toplevel(self.widget)
+        self.tip.wm_overrideredirect(True)
+        x = self.widget.winfo_rootx() + 20
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 4
+        self.tip.geometry(f"+{x}+{y}")
+        lbl = tk.Label(
+            self.tip,
+            text=self.text,
+            bg="#1A2A3A",
+            fg="#C0CDD8",
+            bd=1,
+            relief=tk.SOLID,
+            padx=8,
+            pady=5,
+            wraplength=520,
+            justify=tk.LEFT,
+            font=(None, 10),
+        )
+        lbl.pack()
+
+    def _hide(self, _event=None) -> None:
+        if self.tip:
+            self.tip.destroy()
+            self.tip = None
