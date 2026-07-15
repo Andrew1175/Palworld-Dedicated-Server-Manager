@@ -1,0 +1,119 @@
+name: Release
+
+# Triggers on any tag push matching v* (e.g. v1.9.9, v2.0.0)
+on:
+  push:
+    tags:
+      - 'v*'
+  # Also allows manual trigger from the Actions tab
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Version tag (e.g. v1.9.9) — used for the GitHub Release title'
+        required: true
+        default: 'v0.0.0'
+
+permissions:
+  contents: write   # needed to create GitHub Releases and upload assets
+
+jobs:
+  build-and-release:
+    name: Build EXE & Publish Release
+    runs-on: windows-latest   # PyInstaller Windows build MUST run on Windows
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ─────────────────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Install dependencies ─────────────────────────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install "pyinstaller>=6.0"
+
+      # ── 4. Read APP_VERSION from constants.py ────────────────────────────────
+      - name: Read APP_VERSION
+        id: app_version
+        run: |
+          $ver = python -c "from palworld_manager.constants import APP_VERSION; print(APP_VERSION)"
+          echo "APP_VERSION=$ver" >> $env:GITHUB_OUTPUT
+          echo "Version detected: $ver"
+        shell: pwsh
+
+      # ── 5. Build Release EXE (windowed, no console) ──────────────────────────
+      - name: Build Release EXE
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --windowed `
+            --onedir `
+            --name "Palworld-Dedicated-Server-Manager" `
+            --icon "palworld_logo.ico" `
+            --add-data "palworld_logo.ico;." `
+            run_manager.py
+        shell: pwsh
+
+      # ── 6. Build Debug EXE (console window visible) ──────────────────────────
+      - name: Build Debug EXE
+        run: |
+          python -m PyInstaller `
+            --noconfirm `
+            --clean `
+            --console `
+            --onedir `
+            --debug=all `
+            --name "Palworld-Dedicated-Server-Manager-Debug" `
+            --icon "palworld_logo.ico" `
+            --add-data "palworld_logo.ico;." `
+            run_manager.py
+        shell: pwsh
+
+      # ── 7. Zip both builds ───────────────────────────────────────────────────
+      - name: Create Release ZIP
+        run: |
+          $ver = "${{ steps.app_version.outputs.APP_VERSION }}"
+          python -c "import shutil; shutil.make_archive('Palworld-Dedicated-Server-Manager-v$ver', 'zip', 'dist/Palworld-Dedicated-Server-Manager')"
+        shell: pwsh
+
+      - name: Create Debug ZIP
+        run: |
+          $ver = "${{ steps.app_version.outputs.APP_VERSION }}"
+          python -c "import shutil; shutil.make_archive('Palworld-Dedicated-Server-Manager-Debug-v$ver', 'zip', 'dist/Palworld-Dedicated-Server-Manager-Debug')"
+        shell: pwsh
+
+      # ── 8. Determine the tag name ────────────────────────────────────────────
+      # Works for both tag push events and manual workflow_dispatch
+      - name: Determine tag name
+        id: tag
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            echo "TAG_NAME=${{ github.event.inputs.tag }}" >> $env:GITHUB_OUTPUT
+          } else {
+            echo "TAG_NAME=${{ github.ref_name }}" >> $env:GITHUB_OUTPUT
+          }
+        shell: pwsh
+
+      # ── 9. Create GitHub Release and upload assets ───────────────────────────
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.tag.outputs.TAG_NAME }}
+          name: "Palworld Dedicated Server Manager ${{ steps.tag.outputs.TAG_NAME }}"
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            Palworld-Dedicated-Server-Manager-v${{ steps.app_version.outputs.APP_VERSION }}.zip
+            Palworld-Dedicated-Server-Manager-Debug-v${{ steps.app_version.outputs.APP_VERSION }}.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

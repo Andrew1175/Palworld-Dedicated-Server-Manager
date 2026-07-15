@@ -110,14 +110,6 @@ def save_client_settings(paths, s: ClientInstallSettings) -> None:
         pass
 
 
-DEFAULT_DISCORD_MSG_STOP = "Palworld dedicated server **stopped**."
-DEFAULT_DISCORD_MSG_RESTART = "Palworld dedicated server is **restarting** (manual)."
-DEFAULT_DISCORD_MSG_SCHEDULE = "Palworld dedicated server **scheduled restart** started."
-DEFAULT_DISCORD_MSG_CRASH = (
-    "Palworld dedicated server process **ended unexpectedly** (possible crash)."
-)
-
-
 @dataclass
 class ManagerSettings:
     auto_restart: bool = False
@@ -128,13 +120,19 @@ class ManagerSettings:
     schedule_enabled: bool = False
     schedule_time: str = "04:00"
     steamcmd_force_install_dir: str | None = None
-    discord_webhook_enabled: bool = False
-    discord_webhook_url: str = ""
-    discord_msg_stop: str = DEFAULT_DISCORD_MSG_STOP
-    discord_msg_restart: str = DEFAULT_DISCORD_MSG_RESTART
-    discord_msg_schedule: str = DEFAULT_DISCORD_MSG_SCHEDULE
-    discord_msg_crash: str = DEFAULT_DISCORD_MSG_CRASH
     launch_arguments: str = constants.DEFAULT_LAUNCH_ARGS
+
+    # Discord Bot (replaces legacy webhook fields)
+    discord_bot_enabled: bool = False
+    discord_bot_token: str = ""
+    discord_guild_id: int = 0
+    discord_log_channel_id: int = 0
+    discord_notify_crash: bool = True
+    discord_notify_backup: bool = True
+    discord_notify_restart: bool = True
+    discord_notify_player_join_leave: bool = False
+    discord_rest_api_port: int = constants.DEFAULT_REST_API_PORT
+    discord_rest_api_password: str = ""
 
 
 def load_manager_settings(paths) -> ManagerSettings:
@@ -152,7 +150,6 @@ def load_manager_settings(paths) -> ManagerSettings:
         if "BackupIntervalValue" in s:
             m.backup_interval_value = max(1, int(s["BackupIntervalValue"]))
         elif "BackupInterval" in s:
-            # Backward compatibility with old combobox index storage.
             idx = int(s["BackupInterval"])
             m.backup_interval_value = (1, 4, 8, 16, 24)[idx] if 0 <= idx < 5 else 4
         if "BackupIntervalUnit" in s:
@@ -164,20 +161,43 @@ def load_manager_settings(paths) -> ManagerSettings:
             m.schedule_time = str(s["ScheduleTime"])
         if s.get("SteamCmdForceInstallDir"):
             m.steamcmd_force_install_dir = str(s["SteamCmdForceInstallDir"]).rstrip("\\/")
-        if "DiscordWebhookEnabled" in s:
-            m.discord_webhook_enabled = bool(s["DiscordWebhookEnabled"])
-        if "DiscordWebhookUrl" in s:
-            m.discord_webhook_url = str(s.get("DiscordWebhookUrl") or "").strip()
-        if "DiscordMsgStop" in s:
-            m.discord_msg_stop = str(s.get("DiscordMsgStop") or "").strip() or DEFAULT_DISCORD_MSG_STOP
-        if "DiscordMsgRestart" in s:
-            m.discord_msg_restart = str(s.get("DiscordMsgRestart") or "").strip() or DEFAULT_DISCORD_MSG_RESTART
-        if "DiscordMsgSchedule" in s:
-            m.discord_msg_schedule = str(s.get("DiscordMsgSchedule") or "").strip() or DEFAULT_DISCORD_MSG_SCHEDULE
-        if "DiscordMsgCrash" in s:
-            m.discord_msg_crash = str(s.get("DiscordMsgCrash") or "").strip() or DEFAULT_DISCORD_MSG_CRASH
         if "LaunchArguments" in s:
             m.launch_arguments = str(s.get("LaunchArguments") or "").strip() or constants.DEFAULT_LAUNCH_ARGS
+
+        # Discord Bot settings
+        if "DiscordBotEnabled" in s:
+            m.discord_bot_enabled = bool(s["DiscordBotEnabled"])
+        elif "DiscordWebhookEnabled" in s:
+            # Backward-compat: migrate old webhook flag (token still needs manual setup)
+            m.discord_bot_enabled = False
+        if "DiscordBotToken" in s:
+            m.discord_bot_token = str(s.get("DiscordBotToken") or "").strip()
+        if "DiscordGuildId" in s:
+            try:
+                m.discord_guild_id = int(s["DiscordGuildId"])
+            except (ValueError, TypeError):
+                pass
+        if "DiscordLogChannelId" in s:
+            try:
+                m.discord_log_channel_id = int(s["DiscordLogChannelId"])
+            except (ValueError, TypeError):
+                pass
+        if "DiscordNotifyCrash" in s:
+            m.discord_notify_crash = bool(s["DiscordNotifyCrash"])
+        if "DiscordNotifyBackup" in s:
+            m.discord_notify_backup = bool(s["DiscordNotifyBackup"])
+        if "DiscordNotifyRestart" in s:
+            m.discord_notify_restart = bool(s["DiscordNotifyRestart"])
+        if "DiscordNotifyPlayerJoinLeave" in s:
+            m.discord_notify_player_join_leave = bool(s["DiscordNotifyPlayerJoinLeave"])
+        if "DiscordRestApiPort" in s:
+            try:
+                m.discord_rest_api_port = int(s["DiscordRestApiPort"])
+            except (ValueError, TypeError):
+                pass
+        if "DiscordRestApiPassword" in s:
+            m.discord_rest_api_password = str(s.get("DiscordRestApiPassword") or "").strip()
+
     except (OSError, json.JSONDecodeError, TypeError, ValueError):
         pass
     return m
@@ -202,13 +222,18 @@ def save_manager_settings(
         "SteamInstallRoot": client.steam_install_root,
         "SteamCmdInstallRoot": client.steamcmd_install_root,
         "SteamCmdForceInstallDir": client.steamcmd_force_install_dir,
-        "DiscordWebhookEnabled": m.discord_webhook_enabled,
-        "DiscordWebhookUrl": m.discord_webhook_url,
-        "DiscordMsgStop": m.discord_msg_stop,
-        "DiscordMsgRestart": m.discord_msg_restart,
-        "DiscordMsgSchedule": m.discord_msg_schedule,
-        "DiscordMsgCrash": m.discord_msg_crash,
         "LaunchArguments": m.launch_arguments,
+        # Discord Bot
+        "DiscordBotEnabled": m.discord_bot_enabled,
+        "DiscordBotToken": m.discord_bot_token,
+        "DiscordGuildId": m.discord_guild_id,
+        "DiscordLogChannelId": m.discord_log_channel_id,
+        "DiscordNotifyCrash": m.discord_notify_crash,
+        "DiscordNotifyBackup": m.discord_notify_backup,
+        "DiscordNotifyRestart": m.discord_notify_restart,
+        "DiscordNotifyPlayerJoinLeave": m.discord_notify_player_join_leave,
+        "DiscordRestApiPort": m.discord_rest_api_port,
+        "DiscordRestApiPassword": m.discord_rest_api_password,
     }
     try:
         paths.settings_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
