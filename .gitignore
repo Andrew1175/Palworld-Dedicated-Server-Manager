@@ -20,3 +20,6 @@ dist/
 *.swp
 Thumbs.db
 Desktop.ini
+
+#Internal Change Log
+changes.log

@@ -133,6 +133,7 @@ class PalworldServerManagerApp:
         self._hourly_online_seconds: list[float] = [0.0] * 24
         self._player_session_start_hourly: dict[str, datetime] = {}
         self._insights_last_updated_ts: str | None = None
+        self._insights_after: str | None = None
         self._active_times_chart_points: list[tuple[float, float, int, float]] = []
         self._active_times_tooltip_label: tk.Label | None = None
         self.watchdog_tick = 0
@@ -1252,7 +1253,7 @@ class PalworldServerManagerApp:
 
         tk.Label(
             about,
-            text="Useful project links for updates, documentation, and support.",
+            text="Project links for documentation and support.",
             fg=self.c["text_dim"],
             bg=self.c["bg_panel"],
             font=(None, 10),
@@ -1465,9 +1466,11 @@ class PalworldServerManagerApp:
         self._rest_api_poll_count = 0
         self._poll_rest_api()
         self._apply_config_tab_state()
+        self._start_insights_timer()
 
     def _set_ui_stopped(self) -> None:
         # Anyone still listed as online left when the server stopped.
+        self._stop_insights_timer()
         self._apply_online_player_names(set(), record_history=True)
         self._close_open_insight_sessions()
         self.canvas_status.itemconfig(self._status_dot, fill=self.c["status_stopped"])
@@ -1832,6 +1835,51 @@ class PalworldServerManagerApp:
         for name in list(self._player_session_start_totals.keys()):
             self._on_player_leave(name, ts)
 
+    def _checkpoint_open_insight_sessions(self, when: datetime | None = None) -> bool:
+        """Commit in-progress session time into Insights without ending the sessions."""
+        ts = when or datetime.now()
+        changed = False
+
+        for name, started in list(self._player_session_start_totals.items()):
+            if ts > started:
+                self._player_total_seconds[name] = self._player_total_seconds.get(name, 0.0) + (
+                    ts - started
+                ).total_seconds()
+                self._player_session_start_totals[name] = ts
+                changed = True
+
+        for name, started in list(self._player_session_start_hourly.items()):
+            if ts > started:
+                self._accumulate_hourly_seconds(started, ts)
+                self._player_session_start_hourly[name] = ts
+                changed = True
+
+        if changed:
+            self._save_insights_data()
+            self._refresh_insights_ui()
+        return changed
+
+    def _start_insights_timer(self) -> None:
+        if self._insights_after is not None:
+            return
+        self._insights_after = self.root.after(60_000, self._insights_tick)
+
+    def _stop_insights_timer(self) -> None:
+        if self._insights_after is not None:
+            try:
+                self.root.after_cancel(self._insights_after)
+            except tk.TclError:
+                pass
+            self._insights_after = None
+
+    def _insights_tick(self) -> None:
+        self._insights_after = None
+        if self._player_session_start_totals or self._player_session_start_hourly:
+            self._checkpoint_open_insight_sessions()
+        # Keep ticking while the server UI is marked running.
+        if "Running" in self.lbl_status.cget("text"):
+            self._start_insights_timer()
+
     def _save_insights_data(self) -> None:
         self._insights_last_updated_ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         payload = {
@@ -2062,6 +2110,7 @@ class PalworldServerManagerApp:
             self._start_auto_backup_timer()
 
     def _on_close(self) -> None:
+        self._stop_insights_timer()
         self._close_open_insight_sessions()
         self._save_settings()
         self.root.destroy()

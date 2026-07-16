@@ -1,6 +1,6 @@
 # Developed by: https://github.com/Andrew1175
 
-APP_VERSION = "1.9.9"
+APP_VERSION = "2.0.1"
 
 # GitHub REST API for the latest published release (used by Check for Updates).
 GITHUB_LATEST_RELEASE_API_URL = (
@@ -19,6 +19,10 @@ DEFAULT_REST_API_PORT = 8212
 DEFAULT_GAME_PORT = 8211
 
 PATCH_NOTES: dict[str, list[str]] = {
+    "2.0.1": [
+        "Fixed Insights tab to update every 60 seconds. Previously it was only updating after the player left the server.",
+        "Updated text in Help tab."
+    ],
     "2.0.0": [
         "HUGE rework to the entire UI and codebase",
         "Switched from RCON to REST API",
