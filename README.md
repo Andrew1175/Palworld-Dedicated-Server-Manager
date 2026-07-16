@@ -43,7 +43,6 @@ An open-source dedicated server manager for [Palworld](https://store.steampowere
 2. Extract the `.zip` to a folder of your choice. Keep all contents together:
    - `Palworld-Dedicated-Server-Manager.exe`
    - `_internal` (folder)
-   - `palworld_logo.ico`
 3. **Run `Palworld-Dedicated-Server-Manager.exe`**
 4. Follow the Setup Wizard to configure a new dedicated server or use an existing install.
 5. Click **Install Server** if using SteamCMD.
